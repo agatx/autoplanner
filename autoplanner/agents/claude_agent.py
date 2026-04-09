@@ -59,11 +59,17 @@ def revise(
     document: str,
     review: str,
     *,
+    iteration: int = 1,
+    max_iterations: int = 5,
     steering: str | None = None,
     model: str = "sonnet",
 ) -> str:
+    remaining = max_iterations - iteration
     prompt_template = (PROMPTS_DIR / "claude_revise.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(document=document, review=review) + _steering_block(steering)
+    prompt = prompt_template.format(
+        document=document, review=review,
+        iteration=iteration, max_iterations=max_iterations, remaining=remaining,
+    ) + _steering_block(steering)
     return _run_claude(prompt, model=model)
 
 
@@ -72,9 +78,11 @@ def review(
     task: str,
     iteration: int,
     *,
+    max_iterations: int = 5,
     steering: str | None = None,
     model: str = "sonnet",
 ) -> str:
+    remaining = max_iterations - iteration
     steering_part = ""
     if steering:
         steering_part = (
@@ -82,9 +90,11 @@ def review(
             f"{steering}\nTake this into account in your review."
         )
 
-    # Reuse the same review prompt as codex
     prompt_template = (PROMPTS_DIR / "codex_review.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(task=task, iteration=iteration, document=document) + steering_part
+    prompt = prompt_template.format(
+        task=task, iteration=iteration, document=document,
+        max_iterations=max_iterations, remaining=remaining,
+    ) + steering_part
 
     output = stream_command(
         [

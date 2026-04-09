@@ -42,8 +42,10 @@ def review(
     task: str,
     iteration: int,
     *,
+    max_iterations: int = 5,
     steering: str | None = None,
 ) -> str:
+    remaining = max_iterations - iteration
     steering_part = ""
     if steering:
         steering_part = (
@@ -52,7 +54,10 @@ def review(
         )
 
     prompt_template = (PROMPTS_DIR / "codex_review.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(task=task, iteration=iteration, document=document) + steering_part
+    prompt = prompt_template.format(
+        task=task, iteration=iteration, document=document,
+        max_iterations=max_iterations, remaining=remaining,
+    ) + steering_part
     return stream_command(
         ["codex", "exec", "--json", prompt],
         label="codex",

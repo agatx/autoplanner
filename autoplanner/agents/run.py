@@ -123,7 +123,8 @@ def _stream_claude(proc: subprocess.Popen, label: str, idle_timeout: int, max_ti
             _handle_claude_stream_event(event, label, current_block_ref := [current_block], text_parts)
             current_block = current_block_ref[0]
 
-        elif evt_type == "assistant":
+        elif evt_type == "assistant" and not text_parts:
+            # Fallback only if we got no streaming deltas
             msg = obj.get("message", {})
             for block in msg.get("content", []):
                 if block.get("type") == "text":

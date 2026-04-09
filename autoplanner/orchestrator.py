@@ -59,6 +59,7 @@ def _do_review(
     task: str,
     iteration: int,
     *,
+    max_iterations: int = 5,
     steering: str | None = None,
     claude_model: str = "sonnet",
 ) -> tuple[str, str]:
@@ -66,14 +67,20 @@ def _do_review(
     if reviewer == Reviewer.CODEX:
         try:
             console.print(f"  Reviewing with Codex...")
-            text = codex_agent.review(document, task, iteration, steering=steering)
+            text = codex_agent.review(
+                document, task, iteration,
+                max_iterations=max_iterations, steering=steering,
+            )
             return text, "codex"
         except (RuntimeError, AgentTimeout) as e:
             console.print(f"  [yellow]Codex failed ({e}), falling back to Claude...[/yellow]")
             reviewer = Reviewer.CLAUDE
 
     console.print(f"  Reviewing with Claude...")
-    text = claude_agent.review(document, task, iteration, steering=steering, model=claude_model)
+    text = claude_agent.review(
+        document, task, iteration,
+        max_iterations=max_iterations, steering=steering, model=claude_model,
+    )
     return text, "claude"
 
 
@@ -141,7 +148,9 @@ def _run_loop(
         else:
             console.print(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude...")
             document = claude_agent.revise(
-                document, review_text, steering=user_steering, model=claude_model,
+                document, review_text,
+                iteration=iteration, max_iterations=max_iterations,
+                steering=user_steering, model=claude_model,
             )
             phase = "revision"
 
@@ -160,6 +169,7 @@ def _run_loop(
         # --- Review ---
         review_text, review_author = _do_review(
             active_reviewer, document, task, iteration,
+            max_iterations=max_iterations,
             steering=user_steering, claude_model=claude_model,
         )
 
@@ -176,9 +186,15 @@ def _run_loop(
 
     steering.stop()
 
-    # --- Generate walkthrough in work dir ---
+    # --- Save iteration data ---
+    history.save_json()
+
+    # --- Generate narrative walkthrough via Claude ---
     console.print("\n[bold]Generating walkthrough...[/bold]")
-    history.generate_walkthrough()
+    walkthrough = _generate_walkthrough(task, history, claude_model=claude_model)
+
+    # Save walkthrough to work dir too
+    (history.work_dir / "walkthrough.md").write_text(walkthrough, encoding="utf-8")
 
     # --- Save final documents to cwd ---
     final_name = make_output_name(task, "requirements")
@@ -188,7 +204,32 @@ def _run_loop(
 
     walkthrough_name = make_output_name(task, "walkthrough")
     walkthrough_path = cwd / walkthrough_name
-    walkthrough_path.write_text((history.work_dir / "walkthrough.md").read_text(), encoding="utf-8")
+    walkthrough_path.write_text(walkthrough, encoding="utf-8")
     console.print(f"[green]Walkthrough:    {walkthrough_path.name}[/green]")
 
     return final_path
+
+
+def _generate_walkthrough(task: str, history: History, *, claude_model: str) -> str:
+    from pathlib import Path as _Path
+    prompts_dir = _Path(__file__).parent / "prompts"
+    template = (prompts_dir / "walkthrough.txt").read_text(encoding="utf-8")
+    prompt = template.format(
+        task=task,
+        iteration_history=history.build_iteration_history(),
+    )
+    from autoplanner.agents.run import stream_command, StreamMode
+    return stream_command(
+        [
+            "claude",
+            "-p",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--model", claude_model,
+            "--no-session-persistence",
+            prompt,
+        ],
+        label="claude-walkthrough",
+        mode=StreamMode.CLAUDE,
+    )

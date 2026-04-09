@@ -1,5 +1,10 @@
-You have received a review of your requirements document. 
-Review the feedback carefully, evaluate its merit and only then revise the document to address valid feedback. 
+You have received a review of your requirements document.
+This is revision {iteration} of {max_iterations} ({remaining} remaining).
+
+Review the feedback carefully, evaluate its merit and only then revise the document to address valid feedback.
+Focus on the highest-severity issues first. If the reviewer's suggestion conflicts with prior decisions, explain your reasoning in the document.
+If this is a late iteration, prioritize converging — make targeted fixes rather than restructuring.
+
 Output ONLY the revised markdown document — no preamble, no commentary, no wrapping code fences. Start directly with the top-level heading.
 
 ## Current Document
