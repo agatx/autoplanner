@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 
 from rich.console import Console
 
 from autoplanner.agents import claude_agent, codex_agent
-from autoplanner.history import History, IterationRecord
+from autoplanner.agents.run import AgentTimeout
+from autoplanner.history import History, IterationRecord, make_run_id, make_output_name
 from autoplanner.steering import SteeringInput
 
 console = Console()
+
+AUTOPLANNER_DIR = ".autoplanner"
+
+
+class Reviewer(str, Enum):
+    AUTO = "auto"
+    CODEX = "codex"
+    CLAUDE = "claude"
 
 
 def is_done(review_text: str, iteration: int, max_iterations: int) -> bool:
@@ -21,16 +31,95 @@ def is_done(review_text: str, iteration: int, max_iterations: int) -> bool:
     return False
 
 
+def _resolve_reviewer(requested: Reviewer) -> Reviewer:
+    """Determine which reviewer to use, running preflight checks as needed."""
+    if requested == Reviewer.CLAUDE:
+        return Reviewer.CLAUDE
+
+    if requested == Reviewer.CODEX:
+        console.print("  Checking Codex availability...")
+        if codex_agent.preflight():
+            return Reviewer.CODEX
+        console.print("[red]Codex is unavailable and was explicitly requested. Aborting.[/red]")
+        raise RuntimeError("Codex unavailable")
+
+    # Auto mode: try codex, fall back to claude
+    console.print("  Checking Codex availability...")
+    if codex_agent.preflight():
+        console.print("  [green]Codex available[/green]")
+        return Reviewer.CODEX
+    else:
+        console.print("  [yellow]Codex unavailable — falling back to Claude for reviews[/yellow]")
+        return Reviewer.CLAUDE
+
+
+def _do_review(
+    reviewer: Reviewer,
+    document: str,
+    task: str,
+    iteration: int,
+    *,
+    steering: str | None = None,
+    claude_model: str = "sonnet",
+) -> tuple[str, str]:
+    """Run review, with fallback on failure. Returns (review_text, author)."""
+    if reviewer == Reviewer.CODEX:
+        try:
+            console.print(f"  Reviewing with Codex...")
+            text = codex_agent.review(document, task, iteration, steering=steering)
+            return text, "codex"
+        except (RuntimeError, AgentTimeout) as e:
+            console.print(f"  [yellow]Codex failed ({e}), falling back to Claude...[/yellow]")
+            reviewer = Reviewer.CLAUDE
+
+    console.print(f"  Reviewing with Claude...")
+    text = claude_agent.review(document, task, iteration, steering=steering, model=claude_model)
+    return text, "claude"
+
+
 def run(
     task: str,
     *,
     max_iterations: int = 5,
-    output_dir: Path = Path("output"),
     claude_model: str = "sonnet",
+    reviewer: Reviewer = Reviewer.AUTO,
 ) -> Path:
-    history = History(task=task, output_dir=output_dir)
+    cwd = Path.cwd()
+    run_id = make_run_id(task)
+    work_dir = cwd / AUTOPLANNER_DIR / run_id
+
+    history = History(task=task, run_id=run_id, work_dir=work_dir)
+
+    try:
+        return _run_loop(
+            task, history,
+            cwd=cwd,
+            max_iterations=max_iterations,
+            claude_model=claude_model,
+            reviewer=reviewer,
+        )
+    finally:
+        history.release()
+
+
+def _run_loop(
+    task: str,
+    history: History,
+    *,
+    cwd: Path,
+    max_iterations: int,
+    claude_model: str,
+    reviewer: Reviewer,
+) -> Path:
     steering = SteeringInput()
     steering.start()
+
+    console.print(f"[dim]Run: {history.run_id}[/dim]")
+    console.print(f"[dim]Work dir: {history.work_dir}[/dim]")
+
+    # Resolve reviewer up front
+    active_reviewer = _resolve_reviewer(reviewer)
+    console.print(f"[dim]Reviewer: {active_reviewer.value}[/dim]")
 
     console.print(
         "[dim]Tip: type anything while agents work to steer the next phase.[/dim]"
@@ -40,7 +129,6 @@ def run(
     review_text = ""
 
     for iteration in range(1, max_iterations + 1):
-        # Collect any steering input typed so far
         user_steering = steering.drain()
         if user_steering:
             console.print(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
@@ -65,35 +153,42 @@ def run(
         ))
         console.print(f"  Saved {path}")
 
-        # Check for steering before review too
         user_steering = steering.drain()
         if user_steering:
             console.print(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
-        # --- Review (Codex) ---
-        console.print(f"  Reviewing with Codex...")
-        review_text = codex_agent.review(document, task, iteration, steering=user_steering)
+        # --- Review ---
+        review_text, review_author = _do_review(
+            active_reviewer, document, task, iteration,
+            steering=user_steering, claude_model=claude_model,
+        )
 
         history.add(IterationRecord(
             iteration=iteration,
             phase="review",
-            author="codex",
+            author=review_author,
             content=review_text,
         ))
-        console.print(f"  Review received ({len(review_text)} chars)")
+        console.print(f"  Review received from {review_author} ({len(review_text)} chars)")
 
         if is_done(review_text, iteration, max_iterations):
             break
 
     steering.stop()
 
-    # --- Generate walkthrough ---
+    # --- Generate walkthrough in work dir ---
     console.print("\n[bold]Generating walkthrough...[/bold]")
-    walkthrough_path = history.generate_walkthrough()
-    console.print(f"[green]Done! Walkthrough: {walkthrough_path}[/green]")
+    history.generate_walkthrough()
 
-    final_path = output_dir / "final.md"
+    # --- Save final documents to cwd ---
+    final_name = make_output_name(task, "requirements")
+    final_path = cwd / final_name
     final_path.write_text(document, encoding="utf-8")
-    console.print(f"[green]Final document: {final_path}[/green]")
+    console.print(f"[green]Final document: {final_path.name}[/green]")
+
+    walkthrough_name = make_output_name(task, "walkthrough")
+    walkthrough_path = cwd / walkthrough_name
+    walkthrough_path.write_text((history.work_dir / "walkthrough.md").read_text(), encoding="utf-8")
+    console.print(f"[green]Walkthrough:    {walkthrough_path.name}[/green]")
 
     return final_path

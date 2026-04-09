@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from autoplanner.agents.run import stream_command
+from autoplanner.agents.run import stream_command, StreamMode
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -36,11 +36,15 @@ def _run_claude(prompt: str, *, model: str = "sonnet") -> str:
         [
             "claude",
             "-p",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
             "--model", model,
             "--no-session-persistence",
             prompt,
         ],
         label="claude",
+        mode=StreamMode.CLAUDE,
     )
     return _extract_markdown(output)
 
@@ -61,3 +65,39 @@ def revise(
     prompt_template = (PROMPTS_DIR / "claude_revise.txt").read_text(encoding="utf-8")
     prompt = prompt_template.format(document=document, review=review) + _steering_block(steering)
     return _run_claude(prompt, model=model)
+
+
+def review(
+    document: str,
+    task: str,
+    iteration: int,
+    *,
+    steering: str | None = None,
+    model: str = "sonnet",
+) -> str:
+    steering_part = ""
+    if steering:
+        steering_part = (
+            f"\n\nThe document author has additional guidance for this review:\n"
+            f"{steering}\nTake this into account in your review."
+        )
+
+    # Reuse the same review prompt as codex
+    prompt_template = (PROMPTS_DIR / "codex_review.txt").read_text(encoding="utf-8")
+    prompt = prompt_template.format(task=task, iteration=iteration, document=document) + steering_part
+
+    output = stream_command(
+        [
+            "claude",
+            "-p",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--model", model,
+            "--no-session-persistence",
+            prompt,
+        ],
+        label="claude-review",
+        mode=StreamMode.CLAUDE,
+    )
+    return output
