@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from autoplanner.agents.run import stream_command
+
+PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
 
 def review(
@@ -17,18 +21,8 @@ def review(
             f"{steering}\nTake this into account in your review."
         )
 
-    prompt = (
-        "You are a critical reviewer of requirements documents. "
-        "Review the following document for completeness, clarity, consistency, "
-        "feasibility, and missing edge cases. Be specific and actionable.\n\n"
-        f"Original task: {task}\n"
-        f"Iteration: {iteration}\n\n"
-        f"## Document to Review\n\n{document}\n\n"
-        "Provide your review as a structured list of issues and suggestions. "
-        "If the document is ready to ship, start your response with 'LGTM' "
-        "and explain briefly why it's ready."
-        + steering_part
-    )
+    prompt_template = (PROMPTS_DIR / "codex_review.txt").read_text(encoding="utf-8")
+    prompt = prompt_template.format(task=task, iteration=iteration, document=document) + steering_part
     return stream_command(
         ["codex", "exec", prompt],
         label="codex",

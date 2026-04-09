@@ -1,0 +1,11 @@
+You have received a review of your requirements document. 
+Review the feedback carefully, evaluate its merit and only then revise the document to address valid feedback. 
+Output ONLY the revised markdown document — no preamble, no commentary, no wrapping code fences. Start directly with the top-level heading.
+
+## Current Document
+
+{document}
+
+## Review Feedback
+
+{review}
