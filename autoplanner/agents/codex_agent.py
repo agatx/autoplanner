@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
 
-from autoplanner.agents.run import stream_command, StreamMode
-
-PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+from autoplanner.agents.session import CodexSession
+from autoplanner.prompts import load, steering_block
 
 
 def preflight() -> bool:
@@ -19,15 +17,10 @@ def preflight() -> bool:
             timeout=30,
         )
         if result.returncode != 0:
-            stderr = result.stderr.lower()
-            if "rate" in stderr or "limit" in stderr or "quota" in stderr or "429" in stderr:
+            combined = (result.stderr + result.stdout).lower()
+            if any(s in combined for s in ["rate", "limit", "quota", "429", "error"]):
                 print("  [codex] Rate limit detected in preflight check", file=sys.stderr)
                 return False
-            # Check stdout JSON for errors too
-            for line in result.stdout.splitlines():
-                if '"error"' in line.lower() or '"rate' in line.lower():
-                    print("  [codex] Rate limit detected in preflight check", file=sys.stderr)
-                    return False
         return result.returncode == 0
     except subprocess.TimeoutExpired:
         print("  [codex] Preflight timed out", file=sys.stderr)
@@ -38,6 +31,7 @@ def preflight() -> bool:
 
 
 def review(
+    session: CodexSession,
     document: str,
     task: str,
     iteration: int,
@@ -46,20 +40,8 @@ def review(
     steering: str | None = None,
 ) -> str:
     remaining = max_iterations - iteration
-    steering_part = ""
-    if steering:
-        steering_part = (
-            f"\n\nThe document author has additional guidance for this review:\n"
-            f"{steering}\nTake this into account in your review."
-        )
-
-    prompt_template = (PROMPTS_DIR / "codex_review.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(
+    prompt = load("codex_review.txt").format(
         task=task, iteration=iteration, document=document,
         max_iterations=max_iterations, remaining=remaining,
-    ) + steering_part
-    return stream_command(
-        ["codex", "exec", "--json", prompt],
-        label="codex",
-        mode=StreamMode.CODEX,
-    )
+    ) + steering_block(steering)
+    return session.send(prompt)

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-from autoplanner.agents.run import stream_command, StreamMode
-
-PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+from autoplanner.agents.session import ClaudeSession
+from autoplanner.prompts import load, steering_block
 
 
 def _extract_markdown(text: str) -> str:
@@ -21,93 +19,40 @@ def _extract_markdown(text: str) -> str:
     return text.strip()
 
 
-def _steering_block(steering: str | None) -> str:
-    if not steering:
-        return ""
-    return (
-        f"\n\n## Author's Guidance\n\n"
-        f"The document author has provided additional direction:\n{steering}\n"
-        f"Incorporate this guidance into your work."
-    )
-
-
-def _run_claude(prompt: str, *, model: str = "sonnet") -> str:
-    output = stream_command(
-        [
-            "claude",
-            "-p",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--model", model,
-            "--no-session-persistence",
-            prompt,
-        ],
-        label="claude",
-        mode=StreamMode.CLAUDE,
-    )
-    return _extract_markdown(output)
-
-
-def draft(task: str, *, steering: str | None = None, model: str = "sonnet") -> str:
-    prompt_template = (PROMPTS_DIR / "claude_draft.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(task=task) + _steering_block(steering)
-    return _run_claude(prompt, model=model)
+def draft(session: ClaudeSession, task: str, *, steering: str | None = None) -> str:
+    prompt = load("claude_draft.txt").format(task=task) + steering_block(steering)
+    return _extract_markdown(session.send(prompt))
 
 
 def revise(
+    session: ClaudeSession,
     document: str,
     review: str,
     *,
     iteration: int = 1,
     max_iterations: int = 5,
     steering: str | None = None,
-    model: str = "sonnet",
 ) -> str:
     remaining = max_iterations - iteration
-    prompt_template = (PROMPTS_DIR / "claude_revise.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(
+    prompt = load("claude_revise.txt").format(
         document=document, review=review,
         iteration=iteration, max_iterations=max_iterations, remaining=remaining,
-    ) + _steering_block(steering)
-    return _run_claude(prompt, model=model)
+    ) + steering_block(steering)
+    return _extract_markdown(session.send(prompt))
 
 
 def review(
+    session: ClaudeSession,
     document: str,
     task: str,
     iteration: int,
     *,
     max_iterations: int = 5,
     steering: str | None = None,
-    model: str = "sonnet",
 ) -> str:
     remaining = max_iterations - iteration
-    steering_part = ""
-    if steering:
-        steering_part = (
-            f"\n\nThe document author has additional guidance for this review:\n"
-            f"{steering}\nTake this into account in your review."
-        )
-
-    prompt_template = (PROMPTS_DIR / "codex_review.txt").read_text(encoding="utf-8")
-    prompt = prompt_template.format(
+    prompt = load("codex_review.txt").format(
         task=task, iteration=iteration, document=document,
         max_iterations=max_iterations, remaining=remaining,
-    ) + steering_part
-
-    output = stream_command(
-        [
-            "claude",
-            "-p",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--model", model,
-            "--no-session-persistence",
-            prompt,
-        ],
-        label="claude-review",
-        mode=StreamMode.CLAUDE,
-    )
-    return output
+    ) + steering_block(steering)
+    return session.send(prompt)

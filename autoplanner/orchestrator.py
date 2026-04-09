@@ -6,7 +6,7 @@ from pathlib import Path
 from rich.console import Console
 
 from autoplanner.agents import claude_agent, codex_agent
-from autoplanner.agents.run import AgentTimeout
+from autoplanner.agents.session import ClaudeSession, CodexSession
 from autoplanner.history import History, IterationRecord, make_run_id, make_output_name
 from autoplanner.steering import SteeringInput
 
@@ -32,7 +32,6 @@ def is_done(review_text: str, iteration: int, max_iterations: int) -> bool:
 
 
 def _resolve_reviewer(requested: Reviewer) -> Reviewer:
-    """Determine which reviewer to use, running preflight checks as needed."""
     if requested == Reviewer.CLAUDE:
         return Reviewer.CLAUDE
 
@@ -43,7 +42,6 @@ def _resolve_reviewer(requested: Reviewer) -> Reviewer:
         console.print("[red]Codex is unavailable and was explicitly requested. Aborting.[/red]")
         raise RuntimeError("Codex unavailable")
 
-    # Auto mode: try codex, fall back to claude
     console.print("  Checking Codex availability...")
     if codex_agent.preflight():
         console.print("  [green]Codex available[/green]")
@@ -54,32 +52,31 @@ def _resolve_reviewer(requested: Reviewer) -> Reviewer:
 
 
 def _do_review(
-    reviewer: Reviewer,
+    active_reviewer: Reviewer,
+    codex_session: CodexSession,
+    claude_review_session: ClaudeSession,
     document: str,
     task: str,
     iteration: int,
     *,
     max_iterations: int = 5,
     steering: str | None = None,
-    claude_model: str = "sonnet",
 ) -> tuple[str, str]:
-    """Run review, with fallback on failure. Returns (review_text, author)."""
-    if reviewer == Reviewer.CODEX:
+    if active_reviewer == Reviewer.CODEX:
         try:
             console.print(f"  Reviewing with Codex...")
             text = codex_agent.review(
-                document, task, iteration,
+                codex_session, document, task, iteration,
                 max_iterations=max_iterations, steering=steering,
             )
             return text, "codex"
-        except (RuntimeError, AgentTimeout) as e:
+        except RuntimeError as e:
             console.print(f"  [yellow]Codex failed ({e}), falling back to Claude...[/yellow]")
-            reviewer = Reviewer.CLAUDE
 
     console.print(f"  Reviewing with Claude...")
     text = claude_agent.review(
-        document, task, iteration,
-        max_iterations=max_iterations, steering=steering, model=claude_model,
+        claude_review_session, document, task, iteration,
+        max_iterations=max_iterations, steering=steering,
     )
     return text, "claude"
 
@@ -88,7 +85,10 @@ def run(
     task: str,
     *,
     max_iterations: int = 5,
-    claude_model: str = "sonnet",
+    claude_model: str = "opus",
+    claude_effort: str = "high",
+    codex_model: str = "gpt-4.3",
+    codex_effort: str = "xhigh",
     reviewer: Reviewer = Reviewer.AUTO,
 ) -> Path:
     cwd = Path.cwd()
@@ -97,25 +97,41 @@ def run(
 
     history = History(task=task, run_id=run_id, work_dir=work_dir)
 
+    # Create persistent sessions
+    writer_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude")
+    claude_review_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review")
+    codex_session = CodexSession(model=codex_model, effort=codex_effort, label="codex")
+    walkthrough_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough")
+
     try:
         return _run_loop(
             task, history,
+            writer_session=writer_session,
+            claude_review_session=claude_review_session,
+            codex_session=codex_session,
+            walkthrough_session=walkthrough_session,
             cwd=cwd,
             max_iterations=max_iterations,
-            claude_model=claude_model,
             reviewer=reviewer,
         )
     finally:
         history.release()
+        writer_session.close()
+        claude_review_session.close()
+        codex_session.close()
+        walkthrough_session.close()
 
 
 def _run_loop(
     task: str,
     history: History,
     *,
+    writer_session: ClaudeSession,
+    claude_review_session: ClaudeSession,
+    codex_session: CodexSession,
+    walkthrough_session: ClaudeSession,
     cwd: Path,
     max_iterations: int,
-    claude_model: str,
     reviewer: Reviewer,
 ) -> Path:
     steering = SteeringInput()
@@ -123,8 +139,9 @@ def _run_loop(
 
     console.print(f"[dim]Run: {history.run_id}[/dim]")
     console.print(f"[dim]Work dir: {history.work_dir}[/dim]")
+    console.print(f"[dim]Writer: {writer_session.model} (effort: {writer_session.effort})[/dim]")
+    console.print(f"[dim]Codex:  {codex_session.model} (effort: {codex_session.effort})[/dim]")
 
-    # Resolve reviewer up front
     active_reviewer = _resolve_reviewer(reviewer)
     console.print(f"[dim]Reviewer: {active_reviewer.value}[/dim]")
 
@@ -140,17 +157,17 @@ def _run_loop(
         if user_steering:
             console.print(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
-        # --- Draft or Revise (Claude) ---
+        # --- Draft or Revise (Claude — persistent session) ---
         if iteration == 1:
             console.print(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Drafting with Claude...")
-            document = claude_agent.draft(task, steering=user_steering, model=claude_model)
+            document = claude_agent.draft(writer_session, task, steering=user_steering)
             phase = "draft"
         else:
             console.print(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude...")
             document = claude_agent.revise(
-                document, review_text,
+                writer_session, document, review_text,
                 iteration=iteration, max_iterations=max_iterations,
-                steering=user_steering, model=claude_model,
+                steering=user_steering,
             )
             phase = "revision"
 
@@ -166,11 +183,12 @@ def _run_loop(
         if user_steering:
             console.print(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
-        # --- Review ---
+        # --- Review (persistent session) ---
         review_text, review_author = _do_review(
-            active_reviewer, document, task, iteration,
+            active_reviewer, codex_session, claude_review_session,
+            document, task, iteration,
             max_iterations=max_iterations,
-            steering=user_steering, claude_model=claude_model,
+            steering=user_steering,
         )
 
         history.add(IterationRecord(
@@ -189,11 +207,10 @@ def _run_loop(
     # --- Save iteration data ---
     history.save_json()
 
-    # --- Generate narrative walkthrough via Claude ---
+    # --- Generate narrative walkthrough via Claude (fresh session) ---
     console.print("\n[bold]Generating walkthrough...[/bold]")
-    walkthrough = _generate_walkthrough(task, history, claude_model=claude_model)
+    walkthrough = _generate_walkthrough(task, history, walkthrough_session)
 
-    # Save walkthrough to work dir too
     (history.work_dir / "walkthrough.md").write_text(walkthrough, encoding="utf-8")
 
     # --- Save final documents to cwd ---
@@ -210,26 +227,10 @@ def _run_loop(
     return final_path
 
 
-def _generate_walkthrough(task: str, history: History, *, claude_model: str) -> str:
-    from pathlib import Path as _Path
-    prompts_dir = _Path(__file__).parent / "prompts"
-    template = (prompts_dir / "walkthrough.txt").read_text(encoding="utf-8")
-    prompt = template.format(
+def _generate_walkthrough(task: str, history: History, session: ClaudeSession) -> str:
+    from autoplanner.prompts import load
+    prompt = load("walkthrough.txt").format(
         task=task,
         iteration_history=history.build_iteration_history(),
     )
-    from autoplanner.agents.run import stream_command, StreamMode
-    return stream_command(
-        [
-            "claude",
-            "-p",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--model", claude_model,
-            "--no-session-persistence",
-            prompt,
-        ],
-        label="claude-walkthrough",
-        mode=StreamMode.CLAUDE,
-    )
+    return session.send(prompt)
