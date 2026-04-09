@@ -3,14 +3,18 @@ from __future__ import annotations
 import sys
 import threading
 from queue import Queue, Empty
+from typing import Protocol
 
 
-class SteeringInput:
-    """Background stdin reader that collects user input without blocking the main loop.
+class SteeringSource(Protocol):
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def drain(self) -> str | None: ...
+    def put(self, message: str) -> None: ...
 
-    Type anything while agents are working — it gets picked up at the next
-    transition point and fed as additional context to the next agent call.
-    """
+
+class StdinSteering:
+    """Reads steering input from stdin in a background thread."""
 
     def __init__(self) -> None:
         self._queue: Queue[str] = Queue()
@@ -24,6 +28,9 @@ class SteeringInput:
     def stop(self) -> None:
         self._running = False
 
+    def put(self, message: str) -> None:
+        self._queue.put(message)
+
     def _reader(self) -> None:
         while self._running:
             try:
@@ -33,12 +40,37 @@ class SteeringInput:
                 line = line.strip()
                 if line:
                     self._queue.put(line)
-                    print(f"  [you] {line}  (queued for next phase)", flush=True)
             except EOFError:
                 break
 
     def drain(self) -> str | None:
-        """Drain all queued messages, return combined text or None."""
+        messages: list[str] = []
+        while True:
+            try:
+                messages.append(self._queue.get_nowait())
+            except Empty:
+                break
+        if not messages:
+            return None
+        return "\n".join(messages)
+
+
+class QueueSteering:
+    """Steering input from an external source (e.g. TUI input widget)."""
+
+    def __init__(self) -> None:
+        self._queue: Queue[str] = Queue()
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def put(self, message: str) -> None:
+        self._queue.put(message)
+
+    def drain(self) -> str | None:
         messages: list[str] = []
         while True:
             try:

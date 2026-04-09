@@ -3,14 +3,11 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 
-from rich.console import Console
-
 from autoplanner.agents import claude_agent, codex_agent
 from autoplanner.agents.session import ClaudeSession, CodexSession
 from autoplanner.history import History, IterationRecord, make_run_id, make_output_name
-from autoplanner.steering import SteeringInput
-
-console = Console()
+from autoplanner.output import get_writer
+from autoplanner.steering import SteeringSource, StdinSteering
 
 AUTOPLANNER_DIR = ".autoplanner"
 
@@ -22,32 +19,34 @@ class Reviewer(str, Enum):
 
 
 def is_done(review_text: str, iteration: int, max_iterations: int) -> bool:
+    w = get_writer()
     if iteration >= max_iterations:
-        console.print(f"[yellow]Reached max iterations ({max_iterations}), stopping.[/yellow]")
+        w.write_status(f"[yellow]Reached max iterations ({max_iterations}), stopping.[/yellow]")
         return True
     if review_text.strip().upper().startswith("LGTM"):
-        console.print("[green]Reviewer approved the document.[/green]")
+        w.write_status("[green]Reviewer approved the document.[/green]")
         return True
     return False
 
 
 def _resolve_reviewer(requested: Reviewer) -> Reviewer:
+    w = get_writer()
     if requested == Reviewer.CLAUDE:
         return Reviewer.CLAUDE
 
     if requested == Reviewer.CODEX:
-        console.print("  Checking Codex availability...")
+        w.write_status("  Checking Codex availability...")
         if codex_agent.preflight():
             return Reviewer.CODEX
-        console.print("[red]Codex is unavailable and was explicitly requested. Aborting.[/red]")
+        w.write_status("[red]Codex is unavailable and was explicitly requested. Aborting.[/red]")
         raise RuntimeError("Codex unavailable")
 
-    console.print("  Checking Codex availability...")
+    w.write_status("  Checking Codex availability...")
     if codex_agent.preflight():
-        console.print("  [green]Codex available[/green]")
+        w.write_status("  [green]Codex available[/green]")
         return Reviewer.CODEX
     else:
-        console.print("  [yellow]Codex unavailable — falling back to Claude for reviews[/yellow]")
+        w.write_status("  [yellow]Codex unavailable — falling back to Claude for reviews[/yellow]")
         return Reviewer.CLAUDE
 
 
@@ -62,18 +61,19 @@ def _do_review(
     max_iterations: int = 5,
     steering: str | None = None,
 ) -> tuple[str, str]:
+    w = get_writer()
     if active_reviewer == Reviewer.CODEX:
         try:
-            console.print(f"  Reviewing with Codex...")
+            w.write_status("  Reviewing with Codex...")
             text = codex_agent.review(
                 codex_session, document, task, iteration,
                 max_iterations=max_iterations, steering=steering,
             )
             return text, "codex"
         except RuntimeError as e:
-            console.print(f"  [yellow]Codex failed ({e}), falling back to Claude...[/yellow]")
+            w.write_status(f"  [yellow]Codex failed ({e}), falling back to Claude...[/yellow]")
 
-    console.print(f"  Reviewing with Claude...")
+    w.write_status("  Reviewing with Claude...")
     text = claude_agent.review(
         claude_review_session, document, task, iteration,
         max_iterations=max_iterations, steering=steering,
@@ -90,6 +90,7 @@ def run(
     codex_model: str = "gpt-4.3",
     codex_effort: str = "xhigh",
     reviewer: Reviewer = Reviewer.AUTO,
+    steering_source: SteeringSource | None = None,
 ) -> Path:
     cwd = Path.cwd()
     run_id = make_run_id(task)
@@ -97,11 +98,13 @@ def run(
 
     history = History(task=task, run_id=run_id, work_dir=work_dir)
 
-    # Create persistent sessions
     writer_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude")
     claude_review_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review")
     codex_session = CodexSession(model=codex_model, effort=codex_effort, label="codex")
     walkthrough_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough")
+
+    if steering_source is None:
+        steering_source = StdinSteering()
 
     try:
         return _run_loop(
@@ -113,6 +116,7 @@ def run(
             cwd=cwd,
             max_iterations=max_iterations,
             reviewer=reviewer,
+            steering=steering_source,
         )
     finally:
         history.release()
@@ -133,21 +137,18 @@ def _run_loop(
     cwd: Path,
     max_iterations: int,
     reviewer: Reviewer,
+    steering: SteeringSource,
 ) -> Path:
-    steering = SteeringInput()
+    w = get_writer()
     steering.start()
 
-    console.print(f"[dim]Run: {history.run_id}[/dim]")
-    console.print(f"[dim]Work dir: {history.work_dir}[/dim]")
-    console.print(f"[dim]Writer: {writer_session.model} (effort: {writer_session.effort})[/dim]")
-    console.print(f"[dim]Codex:  {codex_session.model} (effort: {codex_session.effort})[/dim]")
+    w.write_status(f"[dim]Run: {history.run_id}[/dim]")
+    w.write_status(f"[dim]Work dir: {history.work_dir}[/dim]")
+    w.write_status(f"[dim]Writer: {writer_session.model} (effort: {writer_session.effort})[/dim]")
+    w.write_status(f"[dim]Codex:  {codex_session.model} (effort: {codex_session.effort})[/dim]")
 
     active_reviewer = _resolve_reviewer(reviewer)
-    console.print(f"[dim]Reviewer: {active_reviewer.value}[/dim]")
-
-    console.print(
-        "[dim]Tip: type anything while agents work to steer the next phase.[/dim]"
-    )
+    w.write_status(f"[dim]Reviewer: {active_reviewer.value}[/dim]")
 
     document = ""
     review_text = ""
@@ -155,15 +156,14 @@ def _run_loop(
     for iteration in range(1, max_iterations + 1):
         user_steering = steering.drain()
         if user_steering:
-            console.print(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
+            w.write_status(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
-        # --- Draft or Revise (Claude — persistent session) ---
         if iteration == 1:
-            console.print(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Drafting with Claude...")
+            w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Drafting with Claude...")
             document = claude_agent.draft(writer_session, task, steering=user_steering)
             phase = "draft"
         else:
-            console.print(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude...")
+            w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude...")
             document = claude_agent.revise(
                 writer_session, document, review_text,
                 iteration=iteration, max_iterations=max_iterations,
@@ -177,13 +177,12 @@ def _run_loop(
             author="claude",
             content=document,
         ))
-        console.print(f"  Saved {path}")
+        w.write_status(f"  Saved {path}")
 
         user_steering = steering.drain()
         if user_steering:
-            console.print(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
+            w.write_status(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
-        # --- Review (persistent session) ---
         review_text, review_author = _do_review(
             active_reviewer, codex_session, claude_review_session,
             document, task, iteration,
@@ -197,32 +196,28 @@ def _run_loop(
             author=review_author,
             content=review_text,
         ))
-        console.print(f"  Review received from {review_author} ({len(review_text)} chars)")
+        w.write_status(f"  Review received from {review_author} ({len(review_text)} chars)")
 
         if is_done(review_text, iteration, max_iterations):
             break
 
     steering.stop()
 
-    # --- Save iteration data ---
     history.save_json()
 
-    # --- Generate narrative walkthrough via Claude (fresh session) ---
-    console.print("\n[bold]Generating walkthrough...[/bold]")
+    w.write_status("\n[bold]Generating walkthrough...[/bold]")
     walkthrough = _generate_walkthrough(task, history, walkthrough_session)
-
     (history.work_dir / "walkthrough.md").write_text(walkthrough, encoding="utf-8")
 
-    # --- Save final documents to cwd ---
     final_name = make_output_name(task, "requirements")
     final_path = cwd / final_name
     final_path.write_text(document, encoding="utf-8")
-    console.print(f"[green]Final document: {final_path.name}[/green]")
+    w.write_status(f"[green]Final document: {final_path.name}[/green]")
 
     walkthrough_name = make_output_name(task, "walkthrough")
     walkthrough_path = cwd / walkthrough_name
     walkthrough_path.write_text(walkthrough, encoding="utf-8")
-    console.print(f"[green]Walkthrough:    {walkthrough_path.name}[/green]")
+    w.write_status(f"[green]Walkthrough:    {walkthrough_path.name}[/green]")
 
     return final_path
 

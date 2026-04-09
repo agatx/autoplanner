@@ -5,16 +5,15 @@ import json
 import os
 import select
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 import subprocess
 
+from autoplanner.output import get_writer
+
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = [15, 30, 60]
-
-_print_lock = threading.Lock()
 
 
 def _is_transient(text: str) -> bool:
@@ -38,8 +37,11 @@ def _send_with_retry(
         except RuntimeError as e:
             if attempt < MAX_RETRIES and _is_transient(str(e)):
                 wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
-                print(f"  [{label}] Transient error, retrying in {wait}s "
-                      f"(attempt {attempt + 2}/{MAX_RETRIES + 1})...", flush=True)
+                w = get_writer()
+                w.write_status(
+                    f"  [{label}] Transient error, retrying in {wait}s "
+                    f"(attempt {attempt + 2}/{MAX_RETRIES + 1})..."
+                )
                 time.sleep(wait)
                 if on_retry:
                     on_retry()
@@ -57,7 +59,6 @@ class ClaudeSession:
     _session_id: str | None = field(default=None, repr=False)
     _fd: int | None = field(default=None, repr=False)
     _buf: str = field(default="", repr=False)
-    _needs_label: bool = field(default=True, repr=False)
 
     def _ensure_started(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -114,6 +115,7 @@ class ClaudeSession:
 
     def _read_response(self, timeout: int) -> str:
         assert self._fd is not None
+        w = get_writer()
         text_parts: list[str] = []
         current_block: str | None = None
         start = time.monotonic()
@@ -156,28 +158,24 @@ class ClaudeSession:
                         block_type = event.get("content_block", {}).get("type", "")
                         current_block = block_type
                         if block_type == "thinking":
-                            with _print_lock:
-                                print(f"\n  [{self.label}] \033[2m💭 ", end="", flush=True)
+                            w.thinking_start(self.label)
 
                     elif et == "content_block_delta":
                         delta = event.get("delta", {})
                         dt = delta.get("type", "")
                         if dt == "thinking_delta":
-                            with _print_lock:
-                                print(delta.get("thinking", ""), end="", flush=True)
+                            w.write_thinking(delta.get("thinking", ""))
                         elif dt == "text_delta":
                             text = delta.get("text", "")
                             text_parts.append(text)
                             if current_block != "text":
-                                with _print_lock:
-                                    print("\033[0m", flush=True)
+                                w.thinking_end()
                                 current_block = "text"
-                            self._print_text_inline(text)
+                            w.write(text)
 
                     elif et == "content_block_stop":
                         if current_block == "thinking":
-                            with _print_lock:
-                                print("\033[0m", flush=True)
+                            w.thinking_end()
                         current_block = None
 
                 elif evt_type == "result":
@@ -188,16 +186,6 @@ class ClaudeSession:
                     return "".join(text_parts).strip() or obj.get("result", "").strip()
 
         raise RuntimeError(f"{self.label} timed out after {timeout}s")
-
-    def _print_text_inline(self, text: str) -> None:
-        with _print_lock:
-            for ch in text:
-                if self._needs_label:
-                    print(f"  [{self.label}] ", end="", flush=True)
-                    self._needs_label = False
-                print(ch, end="", flush=True)
-                if ch == "\n":
-                    self._needs_label = True
 
     def close(self) -> None:
         if self._proc is not None:
@@ -228,6 +216,8 @@ class CodexSession:
         )
 
     def _send_once(self, content: str, *, timeout: int) -> str:
+        w = get_writer()
+
         if self._session_id:
             cmd = [
                 "codex", "exec", "resume", "--json",
@@ -286,26 +276,20 @@ class CodexSession:
                     text = item.get("text", "")
                     if item_type == "agent_message" and text:
                         text_parts.append(text)
-                        with _print_lock:
-                            for ln in text.splitlines(keepends=True):
-                                print(f"  [{self.label}] {ln}", end="", flush=True)
-                            if not text.endswith("\n"):
-                                print(flush=True)
+                        w.write(text)
                     elif item_type == "tool_call":
                         tool = item.get("name", item.get("call_id", "tool"))
-                        with _print_lock:
-                            print(f"  [{self.label}] \033[33m🔧 {tool}\033[0m", flush=True)
+                        w.write_status(f"  [{self.label}] 🔧 {tool}")
 
                 elif evt_type == "turn.started":
-                    with _print_lock:
-                        print(f"  [{self.label}] thinking...", flush=True)
+                    w.write_status(f"  [{self.label}] thinking...")
         finally:
             stderr = proc.stderr.read() if proc.stderr else ""
             proc.wait()
 
         if proc.returncode != 0:
             if stderr:
-                print(f"  [{self.label}] stderr: {stderr}", file=sys.stderr)
+                w.write_status(f"  [{self.label}] stderr: {stderr[:200]}")
             raise RuntimeError(f"{self.label} exited with code {proc.returncode}: {stderr[:200]}")
 
         return "\n".join(text_parts).strip()
