@@ -11,6 +11,9 @@ from enum import Enum, auto
 IDLE_TIMEOUT = 120
 # Kill process if total runtime exceeds this (seconds)
 MAX_TIMEOUT = 600
+# Retry config for transient errors (overloaded, rate limit)
+MAX_RETRIES = 3
+RETRY_BACKOFF = [15, 30, 60]  # seconds between retries
 
 
 class StreamMode(Enum):
@@ -22,6 +25,15 @@ class AgentTimeout(RuntimeError):
     pass
 
 
+def _is_transient_error(stderr: str, stdout_text: str) -> bool:
+    """Check if the error is transient and worth retrying."""
+    combined = (stderr + stdout_text).lower()
+    return any(s in combined for s in [
+        "overloaded", "529", "rate", "503", "too many requests",
+        "capacity", "temporarily unavailable",
+    ])
+
+
 def stream_command(
     cmd: list[str],
     *,
@@ -31,6 +43,31 @@ def stream_command(
     max_timeout: int = MAX_TIMEOUT,
 ) -> str:
     """Run a subprocess with JSON streaming, displaying thinking and output in real time."""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            return _stream_command_once(
+                cmd, label=label, mode=mode,
+                idle_timeout=idle_timeout, max_timeout=max_timeout,
+            )
+        except RuntimeError as e:
+            if attempt < MAX_RETRIES and _is_transient_error(str(e), ""):
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                print(f"  [{label}] Transient error, retrying in {wait}s (attempt {attempt + 2}/{MAX_RETRIES + 1})...",
+                      flush=True)
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError(f"{label} failed after {MAX_RETRIES + 1} attempts")
+
+
+def _stream_command_once(
+    cmd: list[str],
+    *,
+    label: str,
+    mode: StreamMode,
+    idle_timeout: int,
+    max_timeout: int,
+) -> str:
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -56,7 +93,7 @@ def stream_command(
     if proc.returncode != 0:
         if stderr:
             print(f"  [{label}] stderr: {stderr}", file=sys.stderr)
-        raise RuntimeError(f"{label} exited with code {proc.returncode}")
+        raise RuntimeError(f"{label} exited with code {proc.returncode}: {stderr[:200]}")
 
     return result
 
