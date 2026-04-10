@@ -22,6 +22,10 @@ def run(
     codex_model: Annotated[str, typer.Option("--codex-model", help="Codex model (empty = use codex config)")] = "",
     codex_effort: Annotated[str, typer.Option("--codex-effort", help="Codex reasoning effort (empty = use codex config)")] = "",
     headless: Annotated[bool, typer.Option("--headless", help="Run without TUI (plain terminal output)")] = False,
+    continue_run: Annotated[Optional[str], typer.Option(
+        "--continue", "-c",
+        help="Resume a previous run. Use 'last' for most recent, or pass a run directory name.",
+    )] = None,
     skip_to_walkthrough: Annotated[Optional[str], typer.Option(
         "--skip-to-walkthrough",
         help="Skip draft/review; provide path to .autoplanner run dir or 'synthetic'",
@@ -39,6 +43,33 @@ def run(
     if enable_debug:
         from autoplanner.debug import enable
         enable()
+
+    if continue_run is not None:
+        if headless:
+            from autoplanner import orchestrator
+            orchestrator.resume(
+                continue_run,
+                max_iterations=max_iterations,
+                claude_model=claude_model,
+                claude_effort=claude_effort,
+                codex_model=codex_model,
+                codex_effort=codex_effort,
+                reviewer=reviewer,
+            )
+        else:
+            from autoplanner.tui import AutoplannerApp
+            tui = AutoplannerApp(
+                None,
+                max_iterations=max_iterations,
+                claude_model=claude_model,
+                claude_effort=claude_effort,
+                codex_model=codex_model,
+                codex_effort=codex_effort,
+                reviewer=reviewer,
+                continue_run=continue_run,
+            )
+            tui.run()
+        return
 
     if headless:
         if not task:

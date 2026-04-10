@@ -6,7 +6,7 @@ from pathlib import Path
 
 from autoplanner.agents import claude_agent, codex_agent
 from autoplanner.agents.session import ClaudeSession, CodexSession
-from autoplanner.history import History, IterationRecord, make_run_id, make_output_name
+from autoplanner.history import History, IterationRecord, make_run_id, make_output_name, find_run_dir
 from autoplanner.output import get_writer
 from autoplanner.prompts import load
 from autoplanner.steering import SteeringSource, StdinSteering
@@ -154,6 +154,89 @@ def run(
         ).start()
 
 
+def resume(
+    run_id: str | None = None,
+    *,
+    max_iterations: int = 5,
+    claude_model: str = "opus",
+    claude_effort: str = "high",
+    codex_model: str = "",
+    codex_effort: str = "",
+    reviewer: Reviewer = Reviewer.AUTO,
+    steering_source: SteeringSource | None = None,
+) -> Path:
+    """Resume a previous run from where it left off."""
+    cwd = Path.cwd()
+    base_dir = cwd / AUTOPLANNER_DIR
+    w = get_writer()
+
+    work_dir = find_run_dir(base_dir, run_id)
+    history = History.from_directory(work_dir, lock=True)
+    w.write_status(f"[dim]Resuming run: {history.run_id}[/dim]")
+
+    # Determine where we left off
+    last_document = ""
+    last_review = ""
+    last_iteration = 0
+    for rec in history.records:
+        if rec.phase in ("draft", "revision"):
+            last_document = rec.content
+            last_iteration = rec.iteration
+        elif rec.phase == "review":
+            last_review = rec.content
+
+    if not last_document:
+        raise RuntimeError(f"No draft or revision found in {work_dir.name}")
+
+    # If the last record is a draft/revision (no review for that iteration),
+    # resume from that iteration and skip straight to review.
+    # Otherwise start the next iteration with a revise.
+    last_record = history.records[-1]
+    if last_record.phase == "review":
+        start_iteration = last_record.iteration + 1
+        skip_write = False
+    else:
+        start_iteration = last_record.iteration
+        skip_write = True
+
+    w.write_status(
+        f"[dim]Loaded {len(history.records)} records, "
+        f"resuming from iteration {start_iteration}[/dim]"
+    )
+
+    writer_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude")
+    claude_review_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review")
+    codex_session = CodexSession(model=codex_model, effort=codex_effort, label="codex")
+    walkthrough_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough")
+
+    if steering_source is None:
+        steering_source = StdinSteering()
+
+    try:
+        return _run_loop(
+            history.task, history,
+            writer_session=writer_session,
+            claude_review_session=claude_review_session,
+            codex_session=codex_session,
+            walkthrough_session=walkthrough_session,
+            cwd=cwd,
+            max_iterations=max_iterations,
+            reviewer=reviewer,
+            steering=steering_source,
+            initial_document=last_document,
+            initial_review=last_review,
+            start_iteration=start_iteration,
+            resume_skip_write=skip_write,
+        )
+    finally:
+        history.release()
+        sessions = [writer_session, claude_review_session,
+                    codex_session, walkthrough_session]
+        threading.Thread(
+            target=_close_sessions, args=(sessions,), daemon=True,
+        ).start()
+
+
 def _run_walkthrough_only(
     task: str,
     cwd: Path,
@@ -202,6 +285,9 @@ def _run_loop(
     reviewer: Reviewer,
     steering: SteeringSource,
     initial_document: str | None = None,
+    initial_review: str = "",
+    start_iteration: int = 1,
+    resume_skip_write: bool = False,
 ) -> Path:
     w = get_writer()
     steering.start()
@@ -215,19 +301,32 @@ def _run_loop(
     w.write_status(f"[dim]Reviewer: {active_reviewer.value}[/dim]")
 
     document = ""
-    review_text = ""
+    review_text = initial_review
 
-    for iteration in range(1, max_iterations + 1):
+    for iteration in range(start_iteration, max_iterations + 1):
         # --- Pre-phase steering ---
         user_steering = steering.drain()
         if user_steering:
             w.write_status(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
         # --- Draft or Revise ---
-        if iteration == 1 and initial_document is not None:
+        if resume_skip_write and iteration == start_iteration:
+            # Resuming a run that had a draft but no review — skip to review
+            w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Resuming from prior draft...")
+            document = initial_document
+            phase = "revision"
+        elif iteration == 1 and initial_document is not None:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Using ingested document...")
             document = initial_document
             phase = "draft"
+        elif iteration == start_iteration and initial_document is not None and start_iteration > 1:
+            w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude (resumed)...")
+            document = claude_agent.revise(
+                writer_session, initial_document, review_text,
+                iteration=iteration, max_iterations=max_iterations,
+                steering=user_steering,
+            )
+            phase = "revision"
         elif iteration == 1:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Drafting with Claude...")
             document = claude_agent.draft(writer_session, task, steering=user_steering)

@@ -121,6 +121,7 @@ class AutoplannerApp(App):
         reviewer: Reviewer = Reviewer.AUTO,
         skip_to_walkthrough: str | None = None,
         ingest: str | None = None,
+        continue_run: str | None = None,
     ) -> None:
         super().__init__()
         self._initial_task = task
@@ -132,6 +133,7 @@ class AutoplannerApp(App):
         self._reviewer = reviewer
         self._skip_to_walkthrough = skip_to_walkthrough
         self._ingest = ingest
+        self._continue_run = continue_run
         self._steering = QueueSteering()
         self._running = False
         self._in_thinking = False
@@ -148,7 +150,9 @@ class AutoplannerApp(App):
         set_writer(self._writer)
         heartbeat_start(self)
         self.set_focus(self.query_one("#prompt-input", Input), scroll_visible=False)
-        if self._initial_task:
+        if self._continue_run is not None:
+            self._start_resume(self._continue_run)
+        elif self._initial_task:
             self._start_run(self._initial_task)
 
     def action_quit(self) -> None:
@@ -170,7 +174,6 @@ class AutoplannerApp(App):
         log = self.query_one("#log", RichLog)
 
         if not self._running:
-            log.write(Text(f"> {text}", style="bold"))
             self._start_run(text)
             event.input.placeholder = "Type steering instructions (Enter to send)..."
         else:
@@ -179,6 +182,8 @@ class AutoplannerApp(App):
 
     def _start_run(self, task: str) -> None:
         self._running = True
+        log = self.query_one("#log", RichLog)
+        log.write(Text(f"> {task}", style="bold"))
         self.query_one("#status-bar", Static).update("Running...")
         self._run_orchestrator(task)
 
@@ -202,6 +207,36 @@ class AutoplannerApp(App):
             self.call_from_thread(self._handle_run_complete, result)
         except Exception as e:
             debug(f"worker: exception: {e}")
+            if self._writer is not None:
+                self._writer.flush_pending()
+            self.call_from_thread(self._handle_run_failed, str(e))
+
+    def _start_resume(self, run_id: str) -> None:
+        self._running = True
+        log = self.query_one("#log", RichLog)
+        log.write(Text(f"> Resuming run: {run_id}", style="bold"))
+        self.query_one("#status-bar", Static).update("Resuming...")
+        self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
+        self._run_resume(run_id)
+
+    @work(thread=True)
+    def _run_resume(self, run_id: str) -> None:
+        try:
+            result = orchestrator.resume(
+                run_id,
+                max_iterations=self._max_iterations,
+                claude_model=self._claude_model,
+                claude_effort=self._claude_effort,
+                codex_model=self._codex_model,
+                codex_effort=self._codex_effort,
+                reviewer=self._reviewer,
+                steering_source=self._steering,
+            )
+            if self._writer is not None:
+                self._writer.flush_pending()
+            self.call_from_thread(self._handle_run_complete, result)
+        except Exception as e:
+            debug(f"worker: resume exception: {e}")
             if self._writer is not None:
                 self._writer.flush_pending()
             self.call_from_thread(self._handle_run_failed, str(e))

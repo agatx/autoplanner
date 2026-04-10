@@ -5,3 +5,4 @@ output/
 dist/
 *.pyc
 .DS_Store
+/.autoplanner

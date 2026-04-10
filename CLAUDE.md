@@ -21,6 +21,12 @@ autoplanner --headless "Design a caching layer"
 # Refine existing doc
 autoplanner --ingest existing.md "Improve the design"
 
+# Resume most recent run
+autoplanner -c last
+
+# Resume a specific run (substring match)
+autoplanner -c caching-layer
+
 # Regenerate walkthrough from prior run
 autoplanner --skip-to-walkthrough .autoplanner/<run-id> "Task"
 ```
@@ -63,7 +69,7 @@ Templates are plain `.txt` files loaded once via `lru_cache`. They use Python `s
 
 ### History (`history.py`)
 
-Each run gets a work directory under `.autoplanner/<slug>-<timestamp>/`. Iteration artifacts are saved as `NN_phase.md`. A file lock (`fcntl.flock`) prevents concurrent runs in the same directory. `history.json` stores the machine-readable log. `History.from_directory()` reconstructs from a prior run for walkthrough regeneration.
+Each run gets a work directory under `.autoplanner/<slug>-<timestamp>/`. Iteration artifacts are saved as `NN_phase.md`. A file lock (`fcntl.flock`) prevents concurrent runs in the same directory. `history.json` stores the machine-readable log. `History.from_directory()` reconstructs from a prior run for walkthrough regeneration or resume. `find_run_dir()` locates run directories by exact name, substring match, or most-recent.
 
 ## Key Design Decisions
 
@@ -72,3 +78,8 @@ Each run gets a work directory under `.autoplanner/<slug>-<timestamp>/`. Iterati
 - **Reviewer fallback**: `auto` mode tries Codex first (with a preflight health check), falls back to Claude. Mid-run Codex failures also fall back transparently.
 - **Non-blocking stdout parsing**: ClaudeSession uses `select()` + `os.O_NONBLOCK` to read stream-json events without blocking the thread.
 - **Debug logging goes to a file**: In TUI mode, writing to stderr corrupts Textual's rendering, so `debug.py` writes to `autoplanner-debug.log` via raw `os.write()`. Enable with `--debug` or `AUTOPLANNER_DEBUG=1`.
+- **Resume uses fresh sessions**: `-c` restores document/review state from `history.json` but creates new subprocess sessions. Conversation context does not carry over — the revise prompt provides enough context for Claude to continue meaningfully.
+
+## Workflow Reminders
+
+- **Update README.md** when adding new features, CLI options, or changing any public-facing behavior. The README has a usage section, options table, and examples section that must stay in sync with `main.py`.
