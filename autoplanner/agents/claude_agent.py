@@ -20,7 +20,7 @@ def _extract_markdown(text: str) -> str:
 
 
 def draft(session: ClaudeSession, task: str, *, steering: str | None = None) -> str:
-    prompt = load("claude_draft.txt").format(task=task) + steering_block(steering)
+    prompt = load("draft.txt").format(task=task) + steering_block(steering)
     return _extract_markdown(session.send(prompt))
 
 
@@ -34,10 +34,25 @@ def revise(
     steering: str | None = None,
 ) -> str:
     remaining = max_iterations - iteration
-    prompt = load("claude_revise.txt").format(
+    prompt = load("revise.txt").format(
         document=document, review=review,
         iteration=iteration, max_iterations=max_iterations, remaining=remaining,
     ) + steering_block(steering)
+    return _extract_markdown(session.send(prompt))
+
+
+def correct(session: ClaudeSession, feedback: str) -> str:
+    """Send immediate follow-up feedback to the writer session.
+
+    Used when steering arrives while the agent was producing output.
+    The session already has the full conversation context.
+    """
+    prompt = (
+        "The author just provided urgent feedback on what you produced. "
+        "Apply it now and output ONLY the corrected markdown document — "
+        "no preamble, no commentary. Start directly with the top-level heading.\n\n"
+        f"Feedback: {feedback}"
+    )
     return _extract_markdown(session.send(prompt))
 
 
@@ -51,7 +66,7 @@ def review(
     steering: str | None = None,
 ) -> str:
     remaining = max_iterations - iteration
-    prompt = load("codex_review.txt").format(
+    prompt = load("review.txt").format(
         task=task, iteration=iteration, document=document,
         max_iterations=max_iterations, remaining=remaining,
     ) + steering_block(steering)

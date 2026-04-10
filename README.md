@@ -12,13 +12,21 @@ Agentic document refinement loop that uses **Claude Code** for drafting/revising
 
 Each agent runs in a **persistent session** — conversation context carries across iterations, and token caching keeps costs down.
 
+### Iteration-aware prompts
+
+Review and revision prompts adapt to the current iteration:
+
+- **Early iterations (1-2):** The reviewer focuses on high-level design and architectural soundness, pushing back hard on questionable decisions.
+- **Middle iterations:** Focus shifts to completeness, consistency, and feasibility.
+- **Final iterations:** The reviewer converges toward approval, flagging only critical issues. The writer makes targeted fixes rather than restructuring.
+
 ## Install
 
 ```bash
 pipx install -e .
 ```
 
-Requires `claude` and `codex` CLIs on your PATH.
+Requires `claude` CLI on your PATH. `codex` CLI is optional — if unavailable, Claude handles reviews too.
 
 ## Usage
 
@@ -31,11 +39,17 @@ autoplanner "Design a user authentication system with OAuth2 and MFA"
 
 # Headless mode (plain terminal output)
 autoplanner --headless "Design a user auth system"
+
+# Skip drafting — refine an existing document
+autoplanner --ingest existing-spec.md "Improve the auth system design"
+
+# Regenerate walkthrough from a previous run
+autoplanner --skip-to-walkthrough .autoplanner/design-auth-20260410-143022 "Auth system"
 ```
 
 ### TUI
 
-The default mode opens a terminal UI with a scrolling log and a fixed input box at the bottom. Type steering instructions at any time — they're applied at the next phase transition, or immediately as a correction if typed while an agent is working.
+The default mode opens a terminal UI with a scrolling log and a fixed input box at the bottom. Agent thinking and output stream in real time. Type steering instructions at any time — they're applied at the next phase transition, or immediately as a correction if typed while an agent is working.
 
 Type `q`, `quit`, or Ctrl+C to exit. After a run completes, you can start a new task from the same session.
 
@@ -48,9 +62,12 @@ Type `q`, `quit`, or Ctrl+C to exit. After a run completes, you can start a new 
 | `-r` / `--reviewer` | `auto` | Reviewer agent: `auto`, `codex`, or `claude` |
 | `--claude-model` | `opus` | Claude model for writing and reviewing |
 | `--claude-effort` | `high` | Claude effort level (`low`, `medium`, `high`, `max`) |
-| `--codex-model` | *(from codex config)* | Codex model override |
-| `--codex-effort` | *(from codex config)* | Codex reasoning effort override |
+| `--codex-model` | *(from `~/.codex/config.toml`)* | Codex model override |
+| `--codex-effort` | *(from `~/.codex/config.toml`)* | Codex reasoning effort override |
 | `--headless` | off | Run without TUI (plain terminal output) |
+| `--ingest` | — | Path to a markdown file to use as the initial draft (skips drafting) |
+| `--skip-to-walkthrough` | — | Path to a `.autoplanner` run directory; skips draft/review and regenerates the walkthrough only |
+| `--debug` | off | Enable diagnostic logging to `autoplanner-debug.log` |
 
 ### Examples
 
@@ -63,6 +80,12 @@ autoplanner -n 3 --claude-model sonnet "API rate limiting design"
 
 # Override codex model
 autoplanner --codex-model o3 "Database migration strategy"
+
+# Start from an existing draft and refine it
+autoplanner --ingest draft-v1.md "Database migration strategy"
+
+# Regenerate walkthrough for an earlier run
+autoplanner --skip-to-walkthrough .autoplanner/db-migration-20260409-120000 "Database migration"
 ```
 
 ## Output
@@ -72,14 +95,28 @@ Two files are saved to the current directory:
 - `<slug>-<timestamp>-requirements.md` — the final document
 - `<slug>-<timestamp>-walkthrough.md` — narrative analysis of the document's evolution, key decisions, and attribution
 
-Intermediate iterations are saved in `.autoplanner/<run-id>/` along with `history.json`.
+Intermediate iterations are saved in `.autoplanner/<run-id>/`:
+
+```
+.autoplanner/<run-id>/
+  01_draft.md       # Initial draft
+  01_review.md      # First review
+  02_revision.md    # Revised document
+  02_review.md      # Second review
+  ...
+  walkthrough.md    # Evolution narrative
+  history.json      # Machine-readable iteration log
+```
+
+A file lock prevents concurrent runs from writing to the same work directory.
 
 ## Steering
 
 Type instructions while agents are working to steer the process:
 
 - **Between phases** — applied as context to the next agent call
-- **During an agent response** — picked up immediately after the response completes and applied as a correction before the next phase
+- **During drafting/revision** — picked up after the response completes and applied as an immediate correction
+- **During review** — triggers a correction to the document, then a re-review
 
 Examples of steering input:
 ```
@@ -88,13 +125,29 @@ skip the mobile section, that's out of scope
 the auth flow should use PKCE
 ```
 
+## Reviewer selection
+
+The `--reviewer` flag controls which agent reviews the document:
+
+- **`auto`** (default) — tries Codex first (via a preflight health check), falls back to Claude if Codex is unavailable or rate-limited.
+- **`codex`** — requires Codex; aborts if unavailable.
+- **`claude`** — uses Claude for reviews (same model/effort as the writer, but a separate session to avoid context contamination).
+
+If Codex fails mid-run (e.g. rate limit hit during a review), the orchestrator falls back to Claude for that review automatically.
+
+## Resilience
+
+- **Transient errors** (overloaded, 529, 503, rate limits) are retried up to 3 times with exponential backoff (15s, 30s, 60s).
+- **Process crashes** — if a Claude session process dies, it is restarted transparently on the next send.
+- **Cleanup** — all spawned subprocesses are tracked and killed on exit via `atexit`, even on unexpected termination.
+
 ## Prompts
 
 Agent prompts live in `autoplanner/prompts/` and can be edited to change behavior:
 
-- `claude_draft.txt` — initial document drafting instructions
-- `claude_revise.txt` — revision instructions (iteration-aware)
-- `codex_review.txt` — review criteria (iteration-aware, converges toward approval)
+- `draft.txt` — initial document drafting instructions
+- `revise.txt` — revision instructions (iteration-aware)
+- `review.txt` — review criteria (iteration-aware, converges toward approval)
 - `walkthrough.txt` — narrative walkthrough generation
 
 ## Architecture
@@ -102,19 +155,20 @@ Agent prompts live in `autoplanner/prompts/` and can be edited to change behavio
 ```
 autoplanner/
   main.py            CLI entrypoint (Typer)
-  tui.py             Textual TUI with log + input panes
-  orchestrator.py    Main loop: draft → review → revise → check done
-  output.py          Pluggable writer (terminal vs TUI)
-  steering.py        Steering input (stdin or TUI queue)
-  prompts.py         Cached prompt template loading
-  history.py         Iteration tracking, file saving, walkthrough data
+  tui.py             Textual TUI with streaming log + input
+  orchestrator.py    Main loop: draft → review → revise → done?
+  output.py          Pluggable writer protocol (terminal vs TUI)
+  steering.py        Live steering input (stdin or TUI queue)
+  prompts.py         Cached prompt template loader
+  history.py         Iteration records, file persistence, JSON export
+  debug.py           Opt-in diagnostic logging and event-loop heartbeat
   agents/
-    session.py       Persistent sessions for Claude and Codex CLIs
-    claude_agent.py  Draft, revise, correct, review functions
-    codex_agent.py   Review function + preflight check
+    session.py       Persistent subprocess sessions (Claude + Codex CLIs)
+    claude_agent.py  Draft, revise, correct, review via Claude
+    codex_agent.py   Review + preflight check via Codex
   prompts/
-    claude_draft.txt
-    claude_revise.txt
-    codex_review.txt
+    draft.txt
+    revise.txt
+    review.txt
     walkthrough.txt
 ```

@@ -1,15 +1,37 @@
 from __future__ import annotations
 
+import atexit
 import fcntl
+import functools
 import json
 import os
 import select
-import sys
+import signal
 import time
 from dataclasses import dataclass, field
 import subprocess
 
 from autoplanner.output import get_writer
+
+
+# Track spawned process groups so atexit can kill stragglers
+_active_pgroups: set[int] = set()
+
+
+def _kill_pgroup(pid: int) -> None:
+    """Send SIGKILL to a process group, ignoring errors if already gone."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _cleanup_all() -> None:
+    for pid in list(_active_pgroups):
+        _kill_pgroup(pid)
+
+
+atexit.register(_cleanup_all)
 
 
 MAX_RETRIES = 3
@@ -80,7 +102,9 @@ class ClaudeSession:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
+        _active_pgroups.add(self._proc.pid)
         assert self._proc.stdout is not None
         self._fd = self._proc.stdout.fileno()
         flags = fcntl.fcntl(self._fd, fcntl.F_GETFL)
@@ -113,18 +137,42 @@ class ClaudeSession:
 
         return self._read_response(timeout)
 
+    def _try_flush_buffer(self, text_parts: list[str]) -> str | None:
+        """If the buffer holds a complete JSON result without trailing newline, return it."""
+        remaining = self._buf.strip()
+        if not remaining:
+            return None
+        try:
+            obj = json.loads(remaining)
+        except json.JSONDecodeError:
+            return None
+        self._buf = ""
+        if obj.get("type") == "result":
+            if obj.get("is_error"):
+                raise RuntimeError(
+                    f"{self.label} error: {obj.get('result', 'unknown error')}"
+                )
+            return "".join(text_parts).strip() or obj.get("result", "").strip()
+        return None
+
     def _read_response(self, timeout: int) -> str:
         assert self._fd is not None
         w = get_writer()
         text_parts: list[str] = []
         current_block: str | None = None
         start = time.monotonic()
+        buf_changed = False
 
         while time.monotonic() - start < timeout:
             ready, _, _ = select.select([self._fd], [], [], 0.1)
             if not ready:
                 if self._proc and self._proc.poll() is not None:
                     raise RuntimeError(f"{self.label} process exited unexpectedly")
+                if buf_changed:
+                    result = self._try_flush_buffer(text_parts)
+                    if result is not None:
+                        return result
+                    buf_changed = False
                 continue
 
             try:
@@ -132,7 +180,16 @@ class ClaudeSession:
             except BlockingIOError:
                 continue
 
+            if not data:
+                result = self._try_flush_buffer(text_parts)
+                if result is not None:
+                    return result
+                if self._proc and self._proc.poll() is not None:
+                    raise RuntimeError(f"{self.label} process exited unexpectedly")
+                continue
+
             self._buf += data
+            buf_changed = True
 
             while "\n" in self._buf:
                 line, self._buf = self._buf.split("\n", 1)
@@ -188,25 +245,55 @@ class ClaudeSession:
         raise RuntimeError(f"{self.label} timed out after {timeout}s")
 
     def close(self) -> None:
+        from autoplanner.debug import debug
         if self._proc is not None:
+            pid = self._proc.pid
             try:
                 self._proc.stdin.close()
             except Exception:
                 pass
-            self._proc.kill()
-            self._proc.wait()
+            _kill_pgroup(pid)
+            try:
+                self._proc.wait(timeout=5)
+            except Exception as e:
+                debug(f"{self.label}: wait({pid}) failed: {e}")
+            _active_pgroups.discard(pid)
             self._proc = None
             self._session_id = None
             self._fd = None
             self._buf = ""
 
 
+@functools.lru_cache(maxsize=1)
+def _read_codex_config() -> tuple[str, str]:
+    """Read model and effort from ~/.codex/config.toml if available."""
+    try:
+        import tomllib
+        from pathlib import Path
+        cfg_path = Path.home() / ".codex" / "config.toml"
+        if cfg_path.exists():
+            with open(cfg_path, "rb") as f:
+                cfg = tomllib.load(f)
+            return cfg.get("model", ""), cfg.get("model_reasoning_effort", "")
+    except Exception:
+        pass
+    return "", ""
+
+
 @dataclass
 class CodexSession:
-    model: str = "gpt-4.3"
-    effort: str = "xhigh"
+    model: str = ""
+    effort: str = ""
     label: str = "codex"
     _session_id: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.model or not self.effort:
+            cfg_model, cfg_effort = _read_codex_config()
+            if not self.model:
+                self.model = cfg_model
+            if not self.effort:
+                self.effort = cfg_effort
 
     def send(self, content: str, *, timeout: int = 600) -> str:
         return _send_with_retry(
@@ -219,27 +306,33 @@ class CodexSession:
         w = get_writer()
 
         if self._session_id:
-            cmd = [
-                "codex", "exec", "resume", "--json",
-                "-c", f"model={self.model}",
-                "-c", f"model_reasoning_effort={self.effort}",
-                self._session_id, content,
-            ]
+            cmd = ["codex", "exec", "resume", "--json"]
         else:
-            cmd = [
-                "codex", "exec", "--json",
-                "-m", self.model,
-                "-c", f"model_reasoning_effort={self.effort}",
-                content,
-            ]
+            cmd = ["codex", "exec", "--json"]
+
+        if self.model:
+            cmd += ["-c", f"model={self.model}"]
+        if self.effort:
+            cmd += ["-c", f"model_reasoning_effort={self.effort}"]
+
+        if self._session_id:
+            cmd += [self._session_id, "-"]
+        else:
+            cmd += ["-"]
 
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
+        _active_pgroups.add(proc.pid)
+        assert proc.stdin is not None
+        proc.stdin.write(content)
+        proc.stdin.close()
         assert proc.stdout is not None
 
         text_parts: list[str] = []
@@ -285,7 +378,15 @@ class CodexSession:
                     w.write_status(f"  [{self.label}] thinking...")
         finally:
             stderr = proc.stderr.read() if proc.stderr else ""
-            proc.wait()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _kill_pgroup(proc.pid)
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            _active_pgroups.discard(proc.pid)
 
         if proc.returncode != 0:
             if stderr:

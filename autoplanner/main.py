@@ -19,11 +19,27 @@ def run(
     reviewer: Annotated[Reviewer, typer.Option("--reviewer", "-r", help="Reviewer: auto, codex, or claude")] = Reviewer.AUTO,
     claude_model: Annotated[str, typer.Option("--claude-model", help="Claude model")] = "opus",
     claude_effort: Annotated[str, typer.Option("--claude-effort", help="Claude effort level (low, medium, high, max)")] = "high",
-    codex_model: Annotated[str, typer.Option("--codex-model", help="Codex model")] = "gpt-4.3",
-    codex_effort: Annotated[str, typer.Option("--codex-effort", help="Codex reasoning effort (low, medium, high, xhigh)")] = "xhigh",
+    codex_model: Annotated[str, typer.Option("--codex-model", help="Codex model (empty = use codex config)")] = "",
+    codex_effort: Annotated[str, typer.Option("--codex-effort", help="Codex reasoning effort (empty = use codex config)")] = "",
     headless: Annotated[bool, typer.Option("--headless", help="Run without TUI (plain terminal output)")] = False,
+    skip_to_walkthrough: Annotated[Optional[str], typer.Option(
+        "--skip-to-walkthrough",
+        help="Skip draft/review; provide path to .autoplanner run dir or 'synthetic'",
+    )] = None,
+    ingest: Annotated[Optional[str], typer.Option(
+        "--ingest",
+        help="Load a pre-existing markdown file as the initial draft (skip drafting)",
+    )] = None,
+    enable_debug: Annotated[bool, typer.Option(
+        "--debug",
+        help="Enable diagnostic logging to stderr",
+    )] = False,
 ) -> None:
     """Draft and iteratively refine a requirements document."""
+    if enable_debug:
+        from autoplanner.debug import enable
+        enable()
+
     if headless:
         if not task:
             raise typer.BadParameter("Task is required in --headless mode")
@@ -36,8 +52,12 @@ def run(
             codex_model=codex_model,
             codex_effort=codex_effort,
             reviewer=reviewer,
+            skip_to_walkthrough=skip_to_walkthrough,
+            ingest=ingest,
         )
     else:
+        if not task and skip_to_walkthrough:
+            task = "walkthrough-test"
         from autoplanner.tui import AutoplannerApp
         tui = AutoplannerApp(
             task,
@@ -47,6 +67,8 @@ def run(
             codex_model=codex_model,
             codex_effort=codex_effort,
             reviewer=reviewer,
+            skip_to_walkthrough=skip_to_walkthrough,
+            ingest=ingest,
         )
         tui.run()
 

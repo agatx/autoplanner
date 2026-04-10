@@ -6,6 +6,19 @@ from queue import Queue, Empty
 from typing import Protocol
 
 
+def _drain_queue(queue: Queue[str]) -> str | None:
+    """Drain all pending messages from a queue, returning them joined or None."""
+    messages: list[str] = []
+    while True:
+        try:
+            messages.append(queue.get_nowait())
+        except Empty:
+            break
+    if not messages:
+        return None
+    return "\n".join(messages)
+
+
 class SteeringSource(Protocol):
     def start(self) -> None: ...
     def stop(self) -> None: ...
@@ -44,15 +57,7 @@ class StdinSteering:
                 break
 
     def drain(self) -> str | None:
-        messages: list[str] = []
-        while True:
-            try:
-                messages.append(self._queue.get_nowait())
-            except Empty:
-                break
-        if not messages:
-            return None
-        return "\n".join(messages)
+        return _drain_queue(self._queue)
 
 
 class QueueSteering:
@@ -71,12 +76,4 @@ class QueueSteering:
         self._queue.put(message)
 
     def drain(self) -> str | None:
-        messages: list[str] = []
-        while True:
-            try:
-                messages.append(self._queue.get_nowait())
-            except Empty:
-                break
-        if not messages:
-            return None
-        return "\n".join(messages)
+        return _drain_queue(self._queue)

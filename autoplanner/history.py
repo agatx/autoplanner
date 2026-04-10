@@ -75,6 +75,19 @@ class History:
             lines.append("\n---\n")
         return "\n".join(lines)
 
+    @classmethod
+    def from_directory(cls, work_dir: Path) -> "History":
+        """Load a History from an existing work directory's history.json."""
+        json_path = work_dir / "history.json"
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        h = object.__new__(cls)
+        h.task = data["task"]
+        h.run_id = data["run_id"]
+        h.work_dir = work_dir
+        h.records = [IterationRecord(**r) for r in data["records"]]
+        h._lock_fd = None
+        return h
+
     def save_json(self) -> Path:
         data = {
             "task": self.task,

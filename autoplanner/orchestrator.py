@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from enum import Enum
 from pathlib import Path
 
@@ -7,9 +8,18 @@ from autoplanner.agents import claude_agent, codex_agent
 from autoplanner.agents.session import ClaudeSession, CodexSession
 from autoplanner.history import History, IterationRecord, make_run_id, make_output_name
 from autoplanner.output import get_writer
+from autoplanner.prompts import load
 from autoplanner.steering import SteeringSource, StdinSteering
 
 AUTOPLANNER_DIR = ".autoplanner"
+
+
+def _close_sessions(sessions: list) -> None:
+    for s in sessions:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 class Reviewer(str, Enum):
@@ -87,12 +97,24 @@ def run(
     max_iterations: int = 5,
     claude_model: str = "opus",
     claude_effort: str = "high",
-    codex_model: str = "gpt-4.3",
-    codex_effort: str = "xhigh",
+    codex_model: str = "",
+    codex_effort: str = "",
     reviewer: Reviewer = Reviewer.AUTO,
     steering_source: SteeringSource | None = None,
+    skip_to_walkthrough: str | None = None,
+    ingest: str | None = None,
 ) -> Path:
     cwd = Path.cwd()
+
+    # --- Fast path: walkthrough only ---
+    if skip_to_walkthrough is not None:
+        return _run_walkthrough_only(
+            task, cwd,
+            skip_to_walkthrough=skip_to_walkthrough,
+            claude_model=claude_model,
+            claude_effort=claude_effort,
+        )
+
     run_id = make_run_id(task)
     work_dir = cwd / AUTOPLANNER_DIR / run_id
 
@@ -106,6 +128,10 @@ def run(
     if steering_source is None:
         steering_source = StdinSteering()
 
+    initial_document: str | None = None
+    if ingest is not None:
+        initial_document = Path(ingest).read_text(encoding="utf-8")
+
     try:
         return _run_loop(
             task, history,
@@ -117,13 +143,50 @@ def run(
             max_iterations=max_iterations,
             reviewer=reviewer,
             steering=steering_source,
+            initial_document=initial_document,
         )
     finally:
         history.release()
-        writer_session.close()
-        claude_review_session.close()
-        codex_session.close()
-        walkthrough_session.close()
+        sessions = [writer_session, claude_review_session,
+                    codex_session, walkthrough_session]
+        threading.Thread(
+            target=_close_sessions, args=(sessions,), daemon=True,
+        ).start()
+
+
+def _run_walkthrough_only(
+    task: str,
+    cwd: Path,
+    *,
+    skip_to_walkthrough: str,
+    claude_model: str,
+    claude_effort: str,
+) -> Path:
+    """Fast path: skip draft/review, run only walkthrough generation."""
+    w = get_writer()
+
+    src = Path(skip_to_walkthrough)
+    history = History.from_directory(src)
+    w.write_status(f"[dim]Loaded history from {src}[/dim]")
+
+    document = ""
+    for rec in reversed(history.records):
+        if rec.phase in ("draft", "revision"):
+            document = rec.content
+            break
+
+    walkthrough_session = ClaudeSession(
+        model=claude_model, effort=claude_effort, label="claude-walkthrough",
+    )
+
+    try:
+        w.write_status("\n[bold]Generating walkthrough...[/bold]")
+        walkthrough = _generate_walkthrough(task, history, walkthrough_session)
+        return _write_outputs(task, cwd, history.work_dir, document, walkthrough)
+    finally:
+        threading.Thread(
+            target=_close_sessions, args=([walkthrough_session],), daemon=True,
+        ).start()
 
 
 def _run_loop(
@@ -138,6 +201,7 @@ def _run_loop(
     max_iterations: int,
     reviewer: Reviewer,
     steering: SteeringSource,
+    initial_document: str | None = None,
 ) -> Path:
     w = get_writer()
     steering.start()
@@ -154,11 +218,17 @@ def _run_loop(
     review_text = ""
 
     for iteration in range(1, max_iterations + 1):
+        # --- Pre-phase steering ---
         user_steering = steering.drain()
         if user_steering:
             w.write_status(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
-        if iteration == 1:
+        # --- Draft or Revise ---
+        if iteration == 1 and initial_document is not None:
+            w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Using ingested document...")
+            document = initial_document
+            phase = "draft"
+        elif iteration == 1:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Drafting with Claude...")
             document = claude_agent.draft(writer_session, task, steering=user_steering)
             phase = "draft"
@@ -171,6 +241,13 @@ def _run_loop(
             )
             phase = "revision"
 
+        # --- Immediate correction if steering arrived during draft/revise ---
+        mid_steering = steering.drain()
+        if mid_steering:
+            w.write_status(f"  [bold magenta]Mid-phase steering — applying correction:[/bold magenta] {mid_steering}")
+            document = claude_agent.correct(writer_session, mid_steering)
+            phase = "revision"
+
         path = history.add(IterationRecord(
             iteration=iteration,
             phase=phase,
@@ -179,16 +256,38 @@ def _run_loop(
         ))
         w.write_status(f"  Saved {path}")
 
+        # --- Pre-review steering ---
         user_steering = steering.drain()
         if user_steering:
             w.write_status(f"  [bold magenta]Steering applied:[/bold magenta] {user_steering}")
 
+        # --- Review ---
         review_text, review_author = _do_review(
             active_reviewer, codex_session, claude_review_session,
             document, task, iteration,
             max_iterations=max_iterations,
             steering=user_steering,
         )
+
+        # --- Immediate correction if steering arrived during review ---
+        mid_steering = steering.drain()
+        if mid_steering:
+            w.write_status(f"  [bold magenta]Mid-review steering — applying correction:[/bold magenta] {mid_steering}")
+            document = claude_agent.correct(writer_session, mid_steering)
+            # Re-save the corrected document
+            history.add(IterationRecord(
+                iteration=iteration,
+                phase="revision",
+                author="claude",
+                content=document,
+            ))
+            # Re-review with the corrected document
+            w.write_status("  Re-reviewing corrected document...")
+            review_text, review_author = _do_review(
+                active_reviewer, codex_session, claude_review_session,
+                document, task, iteration,
+                max_iterations=max_iterations,
+            )
 
         history.add(IterationRecord(
             iteration=iteration,
@@ -207,7 +306,15 @@ def _run_loop(
 
     w.write_status("\n[bold]Generating walkthrough...[/bold]")
     walkthrough = _generate_walkthrough(task, history, walkthrough_session)
-    (history.work_dir / "walkthrough.md").write_text(walkthrough, encoding="utf-8")
+    return _write_outputs(task, cwd, history.work_dir, document, walkthrough)
+
+
+def _write_outputs(
+    task: str, cwd: Path, work_dir: Path, document: str, walkthrough: str,
+) -> Path:
+    """Save final document and walkthrough to cwd, return the document path."""
+    w = get_writer()
+    (work_dir / "walkthrough.md").write_text(walkthrough, encoding="utf-8")
 
     final_name = make_output_name(task, "requirements")
     final_path = cwd / final_name
@@ -223,7 +330,6 @@ def _run_loop(
 
 
 def _generate_walkthrough(task: str, history: History, session: ClaudeSession) -> str:
-    from autoplanner.prompts import load
     prompt = load("walkthrough.txt").format(
         task=task,
         iteration_history=history.build_iteration_history(),
