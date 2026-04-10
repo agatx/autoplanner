@@ -6,7 +6,7 @@ In middle iterations, focus on completeness, consistency, and feasibility. Ensur
 In final iterations, focus on polish — clarity, edge cases, and implementation details. You should be converging toward approval.
 If this is the last iteration, only flag critical issues.
 
-Review the following document for completeness, clarity, consistency, feasibility, and missing edge cases.
+Review the following document for completeness, clarity, consistency, feasibility, and missing edge cases. Push for simplicity and elegance of the solution.
 Be specific and actionable.
 
 Original task: {task}

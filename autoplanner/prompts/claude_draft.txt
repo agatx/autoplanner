@@ -2,6 +2,7 @@ Draft a detailed technical design document for the following task.
 Use clear sections (Overview, Goals, Non-Goals, Requirements, Execution Plan, Alternatives Considered, Open Questions). 
 Consider a full range of alternative approaches and trade-offs before zeroing in on the final design. 
 Include what you considered and rejected in the Alternatives Considered section.
+Push for simplicity and elegance of the solution.
 Do not include any dates or schedule.  Output ONLY the markdown document — no preamble, no commentary, no wrapping code fences. 
 Start directly with the top-level heading.
 
