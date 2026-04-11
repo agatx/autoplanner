@@ -31,7 +31,27 @@ autoplanner -c caching-layer
 autoplanner --skip-to-walkthrough .autoplanner/<run-id> "Task"
 ```
 
-There are no tests, no linter config, and no CI. Python 3.11+ required. Dependencies: typer, rich, textual.
+Python 3.11+ required. No linter config, no CI. Dependencies: typer, rich, textual. Dev dependency: pytest.
+
+## Tests
+
+```bash
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run all tests
+python3 -m pytest tests/ -v
+```
+
+Tests cover pure logic only — no subprocess mocking, no TUI rendering. The suite runs in under a second.
+
+| Module | What it covers |
+|---|---|
+| `test_extract_markdown.py` | `_extract_markdown`: fenced blocks, heading fallback, preamble stripping, edge cases |
+| `test_history.py` | `_slugify`, `find_run_dir`, `last_document_and_review`, `build_iteration_history`, JSON round-trip |
+| `test_is_done.py` | `is_done`: LGTM detection (case/whitespace/prefix), max iterations |
+| `test_steering.py` | `_drain_queue`, `QueueSteering` put/drain lifecycle |
+| `test_session_helpers.py` | `_is_transient` (transient vs permanent errors), `steering_block` formatting |
 
 ## Architecture
 

@@ -12,6 +12,9 @@ dependencies = [
 [project.scripts]
 autoplanner = "autoplanner.main:app"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
