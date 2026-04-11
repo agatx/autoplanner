@@ -185,31 +185,11 @@ class AutoplannerApp(App):
         log = self.query_one("#log", RichLog)
         log.write(Text(f"> {task}", style="bold"))
         self.query_one("#status-bar", Static).update("Running...")
-        self._run_orchestrator(task)
-
-    @work(thread=True)
-    def _run_orchestrator(self, task: str) -> None:
-        try:
-            result = orchestrator.run(
-                task,
-                max_iterations=self._max_iterations,
-                claude_model=self._claude_model,
-                claude_effort=self._claude_effort,
-                codex_model=self._codex_model,
-                codex_effort=self._codex_effort,
-                reviewer=self._reviewer,
-                steering_source=self._steering,
-                skip_to_walkthrough=self._skip_to_walkthrough,
-                ingest=self._ingest,
-            )
-            if self._writer is not None:
-                self._writer.flush_pending()
-            self.call_from_thread(self._handle_run_complete, result)
-        except Exception as e:
-            debug(f"worker: exception: {e}")
-            if self._writer is not None:
-                self._writer.flush_pending()
-            self.call_from_thread(self._handle_run_failed, str(e))
+        self._run_worker(
+            orchestrator.run, task,
+            skip_to_walkthrough=self._skip_to_walkthrough,
+            ingest=self._ingest,
+        )
 
     def _start_resume(self, run_id: str) -> None:
         self._running = True
@@ -217,13 +197,13 @@ class AutoplannerApp(App):
         log.write(Text(f"> Resuming run: {run_id}", style="bold"))
         self.query_one("#status-bar", Static).update("Resuming...")
         self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
-        self._run_resume(run_id)
+        self._run_worker(orchestrator.resume, run_id)
 
     @work(thread=True)
-    def _run_resume(self, run_id: str) -> None:
+    def _run_worker(self, fn, first_arg, **extra_kwargs) -> None:
         try:
-            result = orchestrator.resume(
-                run_id,
+            result = fn(
+                first_arg,
                 max_iterations=self._max_iterations,
                 claude_model=self._claude_model,
                 claude_effort=self._claude_effort,
@@ -231,12 +211,13 @@ class AutoplannerApp(App):
                 codex_effort=self._codex_effort,
                 reviewer=self._reviewer,
                 steering_source=self._steering,
+                **extra_kwargs,
             )
             if self._writer is not None:
                 self._writer.flush_pending()
             self.call_from_thread(self._handle_run_complete, result)
         except Exception as e:
-            debug(f"worker: resume exception: {e}")
+            debug(f"worker: exception: {e}")
             if self._writer is not None:
                 self._writer.flush_pending()
             self.call_from_thread(self._handle_run_failed, str(e))

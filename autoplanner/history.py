@@ -66,6 +66,17 @@ class History:
         path.write_text(record.content, encoding="utf-8")
         return path
 
+    def last_document_and_review(self) -> tuple[str, str]:
+        """Return the most recent (document, review) from the history records."""
+        document = ""
+        review = ""
+        for rec in self.records:
+            if rec.phase in ("draft", "revision"):
+                document = rec.content
+            elif rec.phase == "review":
+                review = rec.content
+        return document, review
+
     def build_iteration_history(self) -> str:
         """Build a structured summary of all iterations for the walkthrough prompt."""
         lines: list[str] = []

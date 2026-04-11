@@ -22,6 +22,17 @@ def _close_sessions(sessions: list) -> None:
             pass
 
 
+def _make_sessions(
+    claude_model: str, claude_effort: str, codex_model: str, codex_effort: str,
+) -> tuple[ClaudeSession, ClaudeSession, CodexSession, ClaudeSession]:
+    return (
+        ClaudeSession(model=claude_model, effort=claude_effort, label="claude"),
+        ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review"),
+        CodexSession(model=codex_model, effort=codex_effort, label="codex"),
+        ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough"),
+    )
+
+
 class Reviewer(str, Enum):
     AUTO = "auto"
     CODEX = "codex"
@@ -120,10 +131,8 @@ def run(
 
     history = History(task=task, run_id=run_id, work_dir=work_dir)
 
-    writer_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude")
-    claude_review_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review")
-    codex_session = CodexSession(model=codex_model, effort=codex_effort, label="codex")
-    walkthrough_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough")
+    writer_session, claude_review_session, codex_session, walkthrough_session = \
+        _make_sessions(claude_model, claude_effort, codex_model, codex_effort)
 
     if steering_source is None:
         steering_source = StdinSteering()
@@ -174,17 +183,7 @@ def resume(
     history = History.from_directory(work_dir, lock=True)
     w.write_status(f"[dim]Resuming run: {history.run_id}[/dim]")
 
-    # Determine where we left off
-    last_document = ""
-    last_review = ""
-    last_iteration = 0
-    for rec in history.records:
-        if rec.phase in ("draft", "revision"):
-            last_document = rec.content
-            last_iteration = rec.iteration
-        elif rec.phase == "review":
-            last_review = rec.content
-
+    last_document, last_review = history.last_document_and_review()
     if not last_document:
         raise RuntimeError(f"No draft or revision found in {work_dir.name}")
 
@@ -204,10 +203,8 @@ def resume(
         f"resuming from iteration {start_iteration}[/dim]"
     )
 
-    writer_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude")
-    claude_review_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review")
-    codex_session = CodexSession(model=codex_model, effort=codex_effort, label="codex")
-    walkthrough_session = ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough")
+    writer_session, claude_review_session, codex_session, walkthrough_session = \
+        _make_sessions(claude_model, claude_effort, codex_model, codex_effort)
 
     if steering_source is None:
         steering_source = StdinSteering()
@@ -252,11 +249,7 @@ def _run_walkthrough_only(
     history = History.from_directory(src)
     w.write_status(f"[dim]Loaded history from {src}[/dim]")
 
-    document = ""
-    for rec in reversed(history.records):
-        if rec.phase in ("draft", "revision"):
-            document = rec.content
-            break
+    document, _ = history.last_document_and_review()
 
     walkthrough_session = ClaudeSession(
         model=claude_model, effort=claude_effort, label="claude-walkthrough",
