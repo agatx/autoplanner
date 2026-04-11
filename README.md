@@ -175,6 +175,18 @@ Agent prompts live in `autoplanner/prompts/` and can be edited to change behavio
 - `review.txt` — review criteria (iteration-aware, converges toward approval)
 - `walkthrough.txt` — narrative walkthrough generation
 
+## Tests
+
+```bash
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run all tests
+python3 -m pytest tests/ -v
+```
+
+The test suite covers pure logic — markdown extraction, slug generation, run directory lookup, loop termination, steering queue draining, transient error detection, and history serialization. No subprocess mocking or TUI rendering. Runs in under a second.
+
 ## Architecture
 
 ```
