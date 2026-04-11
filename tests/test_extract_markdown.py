@@ -50,11 +50,12 @@ class TestHeadingFallback:
         text = "# Already Clean\n\nNo preamble here."
         assert _extract_markdown(text) == "# Already Clean\n\nNo preamble here."
 
-    def test_h2_heading(self):
+    def test_h2_heading_falls_through_to_plain(self):
         text = "Some preamble.\n\n## Section Title\n\nContent."
-        # The regex looks for `# ` (h1). An h2 without a preceding h1
-        # should still be captured since the pattern is `^(#\s+.+)$`.
-        assert "Section Title" in _extract_markdown(text)
+        # The heading regex `^(#\s+.+)$` only matches H1 (`# ...`), not H2+.
+        # With no H1 or fenced block, the full text is returned as-is.
+        result = _extract_markdown(text)
+        assert result == text.strip()
 
     def test_heading_preserves_everything_after(self):
         text = "Ignore this.\n# Title\n\nParagraph 1.\n\n## Sub\n\nParagraph 2."

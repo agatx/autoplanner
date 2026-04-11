@@ -2,7 +2,7 @@
 
 import pytest
 
-from autoplanner.output import set_writer
+from autoplanner.output import get_writer, set_writer
 
 
 class _NullWriter:
@@ -16,11 +16,10 @@ class _NullWriter:
 
 @pytest.fixture(autouse=True)
 def _null_writer():
+    prev = get_writer()
     set_writer(_NullWriter())
     yield
-    # Restore default so other test modules aren't affected
-    from autoplanner.output import TerminalWriter
-    set_writer(TerminalWriter())
+    set_writer(prev)
 
 
 from autoplanner.orchestrator import is_done

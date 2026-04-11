@@ -1,6 +1,7 @@
 """Tests for autoplanner.history — slugify, find_run_dir, History methods."""
 
 import json
+import os
 
 import pytest
 
@@ -78,8 +79,9 @@ class TestFindRunDir:
     def test_last_returns_most_recent(self, tmp_path):
         _make_run(tmp_path, "run-a")
         _make_run(tmp_path, "run-b")
-        # Touch run-b to make it newer
-        (tmp_path / "run-b" / "history.json").write_text("{}")
+        # Set explicit mtimes so ordering is deterministic across filesystems
+        os.utime(tmp_path / "run-a", (1000, 1000))
+        os.utime(tmp_path / "run-b", (2000, 2000))
         result = find_run_dir(tmp_path, None)
         assert result.name == "run-b"
 
