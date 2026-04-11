@@ -66,6 +66,17 @@ class History:
         path.write_text(record.content, encoding="utf-8")
         return path
 
+    def last_document_and_review(self) -> tuple[str, str]:
+        """Return the most recent (document, review) from the history records."""
+        document = ""
+        review = ""
+        for rec in self.records:
+            if rec.phase in ("draft", "revision"):
+                document = rec.content
+            elif rec.phase == "review":
+                review = rec.content
+        return document, review
+
     def build_iteration_history(self) -> str:
         """Build a structured summary of all iterations for the walkthrough prompt."""
         lines: list[str] = []
@@ -76,8 +87,11 @@ class History:
         return "\n".join(lines)
 
     @classmethod
-    def from_directory(cls, work_dir: Path) -> "History":
-        """Load a History from an existing work directory's history.json."""
+    def from_directory(cls, work_dir: Path, *, lock: bool = False) -> "History":
+        """Load a History from an existing work directory's history.json.
+
+        If *lock* is True the work directory is locked for writing (resume mode).
+        """
         json_path = work_dir / "history.json"
         data = json.loads(json_path.read_text(encoding="utf-8"))
         h = object.__new__(cls)
@@ -86,6 +100,8 @@ class History:
         h.work_dir = work_dir
         h.records = [IterationRecord(**r) for r in data["records"]]
         h._lock_fd = None
+        if lock:
+            h._acquire_lock()
         return h
 
     def save_json(self) -> Path:
@@ -109,3 +125,38 @@ def make_output_name(task: str, suffix: str) -> str:
     slug = _slugify(task)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"{slug}-{ts}-{suffix}.md"
+
+
+def find_run_dir(base_dir: Path, run_id: str | None = None) -> Path:
+    """Locate a run directory under *base_dir*.
+
+    If *run_id* is ``None`` or one of the sentinels ``"last"`` / ``"latest"``,
+    return the most-recently-modified directory that contains a ``history.json``.
+    Otherwise look for an exact or substring match on the directory name.
+    """
+    candidates = sorted(
+        (d for d in base_dir.iterdir() if d.is_dir() and (d / "history.json").exists()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No completed runs found in {base_dir}")
+
+    if run_id is None or run_id in ("last", "latest"):
+        return candidates[0]
+
+    # Exact match
+    for d in candidates:
+        if d.name == run_id:
+            return d
+
+    # Substring match
+    matches = [d for d in candidates if run_id in d.name]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        names = "\n  ".join(d.name for d in matches)
+        raise ValueError(f"Ambiguous run ID '{run_id}', matches:\n  {names}")
+
+    names = "\n  ".join(d.name for d in candidates)
+    raise FileNotFoundError(f"No run matching '{run_id}'. Available:\n  {names}")

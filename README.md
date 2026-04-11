@@ -43,6 +43,12 @@ autoplanner --headless "Design a user auth system"
 # Skip drafting — refine an existing document
 autoplanner --ingest existing-spec.md "Improve the auth system design"
 
+# Resume the most recent run
+autoplanner -c last
+
+# Resume a specific run (exact or substring match on directory name)
+autoplanner -c design-auth
+
 # Regenerate walkthrough from a previous run
 autoplanner --skip-to-walkthrough .autoplanner/design-auth-20260410-143022 "Auth system"
 ```
@@ -65,6 +71,7 @@ Type `q`, `quit`, or Ctrl+C to exit. After a run completes, you can start a new 
 | `--codex-model` | *(from `~/.codex/config.toml`)* | Codex model override |
 | `--codex-effort` | *(from `~/.codex/config.toml`)* | Codex reasoning effort override |
 | `--headless` | off | Run without TUI (plain terminal output) |
+| `-c` / `--continue` | — | Resume a previous run. `last` for most recent, or a run directory name (substring match supported) |
 | `--ingest` | — | Path to a markdown file to use as the initial draft (skips drafting) |
 | `--skip-to-walkthrough` | — | Path to a `.autoplanner` run directory; skips draft/review and regenerates the walkthrough only |
 | `--debug` | off | Enable diagnostic logging to `autoplanner-debug.log` |
@@ -83,6 +90,12 @@ autoplanner --codex-model o3 "Database migration strategy"
 
 # Start from an existing draft and refine it
 autoplanner --ingest draft-v1.md "Database migration strategy"
+
+# Resume the last run with more iterations
+autoplanner -c last -n 10
+
+# Resume a run by substring match
+autoplanner -c db-migration
 
 # Regenerate walkthrough for an earlier run
 autoplanner --skip-to-walkthrough .autoplanner/db-migration-20260409-120000 "Database migration"
@@ -134,6 +147,18 @@ The `--reviewer` flag controls which agent reviews the document:
 - **`claude`** — uses Claude for reviews (same model/effort as the writer, but a separate session to avoid context contamination).
 
 If Codex fails mid-run (e.g. rate limit hit during a review), the orchestrator falls back to Claude for that review automatically.
+
+## Resuming runs
+
+Use `-c` / `--continue` to pick up where a previous run left off — useful after hitting max iterations:
+
+```bash
+autoplanner -c last          # most recent run
+autoplanner -c caching       # substring match on run directory name
+autoplanner -c last -n 10    # resume with a higher iteration cap
+```
+
+Resume loads `history.json` from the run's work directory, determines the last completed phase, and continues the draft-review loop from there. New sessions are created (conversation context doesn't carry over), but the document and review state are restored.
 
 ## Resilience
 
