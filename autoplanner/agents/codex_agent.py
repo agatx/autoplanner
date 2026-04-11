@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from autoplanner.agents.session import CodexSession
-from autoplanner.prompts import load, steering_block
+from autoplanner.prompts import load, steering_block, locked_decisions_block
 
 
 def preflight() -> bool:
@@ -40,10 +40,15 @@ def review(
     *,
     max_iterations: int = 5,
     steering: str | None = None,
+    human_review: bool = False,
+    locked_decisions: list[dict] | None = None,
 ) -> str:
     remaining = max_iterations - iteration
     prompt = load("review.txt").format(
         task=task, iteration=iteration, document=document,
         max_iterations=max_iterations, remaining=remaining,
-    ) + steering_block(steering)
+    )
+    if human_review:
+        prompt += load("decisions_instruction.txt")
+    prompt += locked_decisions_block(locked_decisions or []) + steering_block(steering)
     return session.send(prompt)

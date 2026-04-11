@@ -22,8 +22,8 @@ def _slugify(text: str, max_len: int = 50) -> str:
 @dataclass
 class IterationRecord:
     iteration: int
-    phase: Literal["draft", "review", "revision"]
-    author: Literal["claude", "codex"]
+    phase: Literal["draft", "review", "revision", "decision"]
+    author: Literal["claude", "codex", "human"]
     content: str
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -34,6 +34,7 @@ class History:
     run_id: str
     work_dir: Path
     records: list[IterationRecord] = field(default_factory=list)
+    decisions: dict[str, dict] = field(default_factory=dict)
     _lock_fd: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -77,6 +78,87 @@ class History:
                 review = rec.content
         return document, review
 
+    # ---- Decision state methods ----
+
+    def propose_decision(self, decision: dict) -> bool:
+        """Add a proposed decision. Returns False (no-op) on dedup or already-proposed."""
+        did = decision["id"]
+        existing = self.decisions.get(did)
+
+        if existing is not None:
+            # Dedup: same ID, already proposed/active, no conflict_with on incoming
+            if existing["state"] in ("proposed", "active") and not decision.get("conflict_with"):
+                return False
+            # Already proposed (idempotent replay)
+            if existing["state"] == "proposed":
+                return False
+            # Collision with superseded entry is invalid
+            if existing["state"] == "superseded":
+                raise ValueError(f"Decision ID {did} collides with superseded entry")
+
+        # Handle conflict: transition referenced decision active -> challenged
+        conflict_ref = decision.get("conflict_with")
+        if conflict_ref:
+            target = self.decisions.get(conflict_ref)
+            if target is None or target["state"] not in ("active", "challenged"):
+                raise ValueError(
+                    f"conflict_with references {conflict_ref} which is not active or challenged"
+                )
+            if target["state"] == "active":
+                target["state"] = "challenged"
+
+        self.decisions[did] = {
+            "id": did,
+            "state": "proposed",
+            "title": decision["title"],
+            "summary": decision.get("summary", ""),
+            "options": decision.get("options", []),
+            "current_choice": decision.get("current_choice"),
+            "resolution": None,
+            "conflict_with": conflict_ref,
+            "superseded_by": None,
+        }
+        self.save_json()
+        return True
+
+    def lock_decision(self, decision_id: str, resolution: dict) -> None:
+        """Transition proposed -> active, storing the human's resolution."""
+        entry = self.decisions[decision_id]
+
+        # Idempotent: already active with same resolution
+        if entry["state"] == "active" and entry["resolution"] == resolution:
+            return
+
+        entry["state"] = "active"
+        entry["resolution"] = resolution
+
+        conflict_ref = entry.get("conflict_with")
+        if conflict_ref and resolution.get("chosen_effect"):
+            original = self.decisions[conflict_ref]
+            if resolution["chosen_effect"] == "supersede":
+                original["state"] = "superseded"
+                original["superseded_by"] = decision_id
+            elif resolution["chosen_effect"] == "keep_original":
+                original["state"] = "active"
+                # The conflict proposal itself lost — mark it superseded
+                entry["state"] = "superseded"
+
+        self.save_json()
+
+    def active_decisions(self) -> list[dict]:
+        """Return active and challenged decisions (for prompt injection)."""
+        return [d for d in self.decisions.values() if d["state"] in ("active", "challenged")]
+
+    def has_proposed(self) -> bool:
+        """Return whether any proposed (unresolved) decisions exist."""
+        return any(d["state"] == "proposed" for d in self.decisions.values())
+
+    def pending_decisions(self) -> list[dict]:
+        """Return proposed decisions (for resume re-presentation)."""
+        return [d for d in self.decisions.values() if d["state"] == "proposed"]
+
+    # ---- Iteration history ----
+
     def build_iteration_history(self) -> str:
         """Build a structured summary of all iterations for the walkthrough prompt."""
         lines: list[str] = []
@@ -99,6 +181,7 @@ class History:
         h.run_id = data["run_id"]
         h.work_dir = work_dir
         h.records = [IterationRecord(**r) for r in data["records"]]
+        h.decisions = data.get("decisions", {})
         h._lock_fd = None
         if lock:
             h._acquire_lock()
@@ -109,6 +192,7 @@ class History:
             "task": self.task,
             "run_id": self.run_id,
             "records": [asdict(r) for r in self.records],
+            "decisions": self.decisions,
         }
         json_path = self.work_dir / "history.json"
         json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

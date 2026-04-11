@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Annotated, Optional
 
 import typer
@@ -34,6 +35,18 @@ def run(
         "--ingest",
         help="Load a pre-existing markdown file as the initial draft (skip drafting)",
     )] = None,
+    human_review: Annotated[bool, typer.Option(
+        "--human-review", "-H",
+        help="Enable human-in-the-loop review of high-stakes decisions",
+    )] = False,
+    on_decision: Annotated[Optional[str], typer.Option(
+        "--on-decision",
+        help="Decision resolution policy: prompt, accept, or fail (default: auto-detect from TTY)",
+    )] = None,
+    on_parse_error: Annotated[Optional[str], typer.Option(
+        "--on-parse-error",
+        help="Parse error policy: warn or fail (default: auto-detect from TTY)",
+    )] = None,
     enable_debug: Annotated[bool, typer.Option(
         "--debug",
         help="Enable diagnostic logging to stderr",
@@ -43,6 +56,22 @@ def run(
     if enable_debug:
         from autoplanner.debug import enable
         enable()
+
+    # TTY auto-detection for decision policies
+    if on_decision is None:
+        on_decision = "prompt" if sys.stdin.isatty() else "fail"
+    if on_parse_error is None:
+        on_parse_error = "warn" if sys.stdin.isatty() else "fail"
+    if on_decision not in ("prompt", "accept", "fail"):
+        raise typer.BadParameter(f"Invalid --on-decision: {on_decision}")
+    if on_parse_error not in ("warn", "fail"):
+        raise typer.BadParameter(f"Invalid --on-parse-error: {on_parse_error}")
+
+    hitl_kwargs = dict(
+        human_review=human_review,
+        on_decision_policy=on_decision,
+        on_parse_error_policy=on_parse_error,
+    )
 
     if continue_run is not None:
         if headless:
@@ -55,6 +84,7 @@ def run(
                 codex_model=codex_model,
                 codex_effort=codex_effort,
                 reviewer=reviewer,
+                **hitl_kwargs,
             )
         else:
             from autoplanner.tui import AutoplannerApp
@@ -67,6 +97,7 @@ def run(
                 codex_effort=codex_effort,
                 reviewer=reviewer,
                 continue_run=continue_run,
+                **hitl_kwargs,
             )
             tui.run()
         return
@@ -85,6 +116,7 @@ def run(
             reviewer=reviewer,
             skip_to_walkthrough=skip_to_walkthrough,
             ingest=ingest,
+            **hitl_kwargs,
         )
     else:
         if not task and skip_to_walkthrough:
@@ -100,6 +132,7 @@ def run(
             reviewer=reviewer,
             skip_to_walkthrough=skip_to_walkthrough,
             ingest=ingest,
+            **hitl_kwargs,
         )
         tui.run()
 

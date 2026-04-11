@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from autoplanner.agents.session import ClaudeSession
-from autoplanner.prompts import load, steering_block
+from autoplanner.prompts import load, steering_block, locked_decisions_block
 
 
 def _extract_markdown(text: str) -> str:
@@ -32,12 +32,13 @@ def revise(
     iteration: int = 1,
     max_iterations: int = 5,
     steering: str | None = None,
+    locked_decisions: list[dict] | None = None,
 ) -> str:
     remaining = max_iterations - iteration
     prompt = load("revise.txt").format(
         document=document, review=review,
         iteration=iteration, max_iterations=max_iterations, remaining=remaining,
-    ) + steering_block(steering)
+    ) + locked_decisions_block(locked_decisions or []) + steering_block(steering)
     return _extract_markdown(session.send(prompt))
 
 
@@ -64,10 +65,15 @@ def review(
     *,
     max_iterations: int = 5,
     steering: str | None = None,
+    human_review: bool = False,
+    locked_decisions: list[dict] | None = None,
 ) -> str:
     remaining = max_iterations - iteration
     prompt = load("review.txt").format(
         task=task, iteration=iteration, document=document,
         max_iterations=max_iterations, remaining=remaining,
-    ) + steering_block(steering)
+    )
+    if human_review:
+        prompt += load("decisions_instruction.txt")
+    prompt += locked_decisions_block(locked_decisions or []) + steering_block(steering)
     return session.send(prompt)

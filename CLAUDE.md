@@ -49,9 +49,11 @@ Tests cover pure logic only — no subprocess mocking, no TUI rendering. The sui
 |---|---|
 | `test_extract_markdown.py` | `_extract_markdown`: fenced blocks, heading fallback, preamble stripping, edge cases |
 | `test_history.py` | `_slugify`, `find_run_dir`, `last_document_and_review`, `build_iteration_history`, JSON round-trip |
-| `test_is_done.py` | `is_done`: LGTM detection (case/whitespace/prefix), max iterations |
+| `test_is_done.py` | `is_done`: LGTM detection (case/whitespace/prefix), max iterations, decision params |
 | `test_steering.py` | `_drain_queue`, `QueueSteering` put/drain lifecycle |
 | `test_session_helpers.py` | `_is_transient` (transient vs permanent errors), `steering_block` formatting |
+| `test_decisions.py` | `extract_decisions`: trailer parsing, schema validation, conflict validation, strip trailer |
+| `test_history_decisions.py` | Decision state machine: propose, lock, supersede, keep_original, active/pending queries, JSON round-trip |
 
 ## Architecture
 

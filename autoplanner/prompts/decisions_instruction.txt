@@ -1,0 +1,75 @@
+
+
+## Decision Trailer (REQUIRED)
+
+At the END of every review, you MUST append a fenced block tagged `decisions` containing a JSON object. This block is machine-parsed — follow the schema exactly.
+
+### When you find NO high-stakes decisions:
+
+```decisions
+{
+  "decision_status": "none",
+  "decisions": []
+}
+```
+
+### When you identify high-stakes architectural choices:
+
+Only include decisions you consider architecturally consequential — technology choices, data model designs, security boundaries, API contracts, concurrency strategies. Do NOT escalate formatting preferences, naming conventions, or implementation details.
+
+Surface at most 3 high-stakes decisions per review, prioritized by reversibility cost.
+
+If two or more decisions are tightly coupled (choosing one constrains the other), merge them into a single decision record with combined options that represent the valid combinations.
+
+```decisions
+{
+  "decision_status": "present",
+  "decisions": [
+    {
+      "id": "d1",
+      "title": "Short title of the decision",
+      "summary": "What is at stake and why this matters.",
+      "options": [
+        {"key": "A", "label": "Option A label", "pros": "...", "cons": "..."},
+        {"key": "B", "label": "Option B label", "pros": "...", "cons": "..."}
+      ],
+      "current_choice": "A"
+    }
+  ]
+}
+```
+
+Field rules:
+- `id`: A short unique identifier (e.g., "d1", "d2"). Must not collide with any previously locked decision ID.
+- `current_choice`: Must match one of the option `key` values. This is the choice the document currently makes.
+- Each option must have `key`, `label`, `pros`, and `cons`.
+
+### Challenging a previously locked decision:
+
+Do NOT reopen locked decisions unless you have identified a new conflict or incompatibility that was not visible when the decision was made. If you must challenge a locked decision, emit a NEW decision record with a unique ID, a `conflict_with` field referencing the original, and an `effect` field on every option:
+
+```decisions
+{
+  "decision_status": "present",
+  "decisions": [
+    {
+      "id": "d1-v2",
+      "title": "Original title (conflict)",
+      "summary": "Explain the new conflict or incompatibility.",
+      "conflict_with": "d1",
+      "options": [
+        {"key": "A", "label": "Revert to alternative", "effect": "supersede", "pros": "...", "cons": "..."},
+        {"key": "B", "label": "Change constraint instead", "effect": "supersede", "pros": "...", "cons": "..."},
+        {"key": "C", "label": "Keep current choice", "effect": "keep_original", "pros": "...", "cons": "..."}
+      ],
+      "current_choice": "A"
+    }
+  ]
+}
+```
+
+The `effect` field is REQUIRED on every option of a conflict decision:
+- `"supersede"`: Choosing this option replaces the original locked direction.
+- `"keep_original"`: Choosing this option reaffirms the original and discards this conflict.
+
+Do NOT re-emit decisions that are already locked. If a decision you previously proposed is now in the Locked Decisions section, skip it.

@@ -84,6 +84,18 @@ class TuiWriter(Writer):
         self.flush_pending()
         self._app.call_from_thread(self._app.end_thinking)
 
+    def present_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
+        self.flush_pending()
+        self._app.call_from_thread(self._app.render_decision, decision, prior_decisions)
+
+    def await_decision_input(self, valid_keys: list[str], prompt_text: str) -> tuple[str, str]:
+        event = threading.Event()
+        self._app.call_from_thread(
+            self._app.begin_decision_input, valid_keys, prompt_text, event,
+        )
+        event.wait()
+        return self._app._decision_result
+
 
 class AutoplannerApp(App):
     AUTO_FOCUS = "#prompt-input"
@@ -122,6 +134,9 @@ class AutoplannerApp(App):
         skip_to_walkthrough: str | None = None,
         ingest: str | None = None,
         continue_run: str | None = None,
+        human_review: bool = False,
+        on_decision_policy: str = "prompt",
+        on_parse_error_policy: str = "warn",
     ) -> None:
         super().__init__()
         self._initial_task = task
@@ -134,10 +149,17 @@ class AutoplannerApp(App):
         self._skip_to_walkthrough = skip_to_walkthrough
         self._ingest = ingest
         self._continue_run = continue_run
+        self._human_review = human_review
+        self._on_decision_policy = on_decision_policy
+        self._on_parse_error_policy = on_parse_error_policy
         self._steering = QueueSteering()
         self._running = False
         self._in_thinking = False
         self._writer: TuiWriter | None = None
+        self._in_decision_phase = False
+        self._decision_event: threading.Event | None = None
+        self._decision_result: tuple[str, str] | None = None
+        self._decision_valid_keys: list[str] | None = None
 
     def compose(self) -> ComposeResult:
         yield OutputLog(id="log", wrap=True, highlight=True, markup=True)
@@ -173,12 +195,81 @@ class AutoplannerApp(App):
 
         log = self.query_one("#log", RichLog)
 
+        if self._in_decision_phase:
+            self._handle_decision_input(text, log)
+            return
+
         if not self._running:
             self._start_run(text)
             event.input.placeholder = "Type steering instructions (Enter to send)..."
         else:
             log.write(Text(f"[you] {text}", style="bold magenta"))
             self._steering.put(text)
+
+    def _handle_decision_input(self, text: str, log: RichLog) -> None:
+        """Validate and accept decision input."""
+        parts = text.split(None, 1)
+        key = parts[0].upper()
+        note = ""
+        if len(parts) > 1:
+            rest = parts[1]
+            for sep in ("\u2014", "--", "-"):
+                if rest.startswith(sep):
+                    rest = rest[len(sep):].strip()
+                    break
+            note = rest
+
+        if key.lower() == "skip":
+            key = "skip"
+        elif key not in self._decision_valid_keys:
+            log.write(Text(
+                f"Invalid choice '{key}'. Valid: {', '.join(self._decision_valid_keys)}",
+                style="bold red",
+            ))
+            return
+
+        log.write(Text(f"[you] {text}", style="bold magenta"))
+        self._decision_result = (key, note)
+        self._in_decision_phase = False
+        self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
+        self._decision_event.set()
+
+    def render_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
+        """Render a decision block in the output log."""
+        log = self.query_one("#log", RichLog)
+        log.write(Text(""))
+
+        if prior_decisions:
+            log.write(Text("Previously locked:", style="dim"))
+            for pd in prior_decisions:
+                if pd.get("resolution"):
+                    log.write(Text(
+                        f"  {pd['id']} — {pd['resolution']['locked_direction']}",
+                        style="dim",
+                    ))
+            log.write(Text(""))
+
+        conflict_note = f" (challenges {decision['conflict_with']})" if decision.get("conflict_with") else ""
+        log.write(Text(f"Decision: {decision['title']}{conflict_note}", style="bold cyan"))
+        log.write(Text(f"  {decision.get('summary', '')}"))
+        log.write(Text(""))
+
+        for opt in decision.get("options", []):
+            current = " ◀" if opt["key"] == decision.get("current_choice") else ""
+            effect_note = f" [{opt['effect']}]" if opt.get("effect") else ""
+            log.write(Text(f"  [{opt['key']}] {opt['label']}{current}{effect_note}", style="bold"))
+            log.write(Text(f"      Pros: {opt.get('pros', '')}", style="green"))
+            log.write(Text(f"      Cons: {opt.get('cons', '')}", style="red"))
+
+    def begin_decision_input(
+        self, valid_keys: list[str], prompt_text: str, event: threading.Event,
+    ) -> None:
+        """Set up the app to receive decision input (called on main thread)."""
+        self._in_decision_phase = True
+        self._decision_valid_keys = valid_keys
+        self._decision_event = event
+        self._decision_result = None
+        self.query_one("#prompt-input", Input).placeholder = prompt_text
 
     def _start_run(self, task: str) -> None:
         self._running = True
@@ -211,6 +302,9 @@ class AutoplannerApp(App):
                 codex_effort=self._codex_effort,
                 reviewer=self._reviewer,
                 steering_source=self._steering,
+                human_review=self._human_review,
+                on_decision_policy=self._on_decision_policy,
+                on_parse_error_policy=self._on_parse_error_policy,
                 **extra_kwargs,
             )
             if self._writer is not None:
