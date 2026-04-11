@@ -198,6 +198,13 @@ def resume(
         start_iteration = last_record.iteration
         skip_write = True
 
+    if start_iteration > max_iterations:
+        raise RuntimeError(
+            f"Cannot resume run {history.run_id}: next iteration would be "
+            f"{start_iteration}, but max_iterations is {max_iterations}. "
+            "Increase --max-iter to continue this run."
+        )
+
     w.write_status(
         f"[dim]Loaded {len(history.records)} records, "
         f"resuming from iteration {start_iteration}[/dim]"
@@ -304,14 +311,16 @@ def _run_loop(
 
         # --- Draft or Revise ---
         if resume_skip_write and iteration == start_iteration:
-            # Resuming a run that had a draft but no review — skip to review
+            # Resuming a run that had a draft but no review — skip to review.
+            # Don't re-save: the document already exists in history.
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Resuming from prior draft...")
             document = initial_document
-            phase = "revision"
+            skip_history_save = True
         elif iteration == 1 and initial_document is not None:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Using ingested document...")
             document = initial_document
             phase = "draft"
+            skip_history_save = False
         elif iteration == start_iteration and initial_document is not None and start_iteration > 1:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude (resumed)...")
             document = claude_agent.revise(
@@ -320,10 +329,12 @@ def _run_loop(
                 steering=user_steering,
             )
             phase = "revision"
+            skip_history_save = False
         elif iteration == 1:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Drafting with Claude...")
             document = claude_agent.draft(writer_session, task, steering=user_steering)
             phase = "draft"
+            skip_history_save = False
         else:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Revising with Claude...")
             document = claude_agent.revise(
@@ -332,6 +343,7 @@ def _run_loop(
                 steering=user_steering,
             )
             phase = "revision"
+            skip_history_save = False
 
         # --- Immediate correction if steering arrived during draft/revise ---
         mid_steering = steering.drain()
@@ -339,14 +351,16 @@ def _run_loop(
             w.write_status(f"  [bold magenta]Mid-phase steering — applying correction:[/bold magenta] {mid_steering}")
             document = claude_agent.correct(writer_session, mid_steering)
             phase = "revision"
+            skip_history_save = False
 
-        path = history.add(IterationRecord(
-            iteration=iteration,
-            phase=phase,
-            author="claude",
-            content=document,
-        ))
-        w.write_status(f"  Saved {path}")
+        if not skip_history_save:
+            path = history.add(IterationRecord(
+                iteration=iteration,
+                phase=phase,
+                author="claude",
+                content=document,
+            ))
+            w.write_status(f"  Saved {path}")
 
         # --- Pre-review steering ---
         user_steering = steering.drain()

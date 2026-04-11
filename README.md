@@ -150,7 +150,7 @@ If Codex fails mid-run (e.g. rate limit hit during a review), the orchestrator f
 
 ## Resuming runs
 
-Use `-c` / `--continue` to pick up where a previous run left off — useful after hitting max iterations or an interruption:
+Use `-c` / `--continue` to pick up where a previous run left off — useful after hitting max iterations:
 
 ```bash
 autoplanner -c last          # most recent run
