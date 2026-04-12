@@ -159,6 +159,7 @@ class AutoplannerApp(App):
         self._steering = QueueSteering()
         self._running = False
         self._in_thinking = False
+        self._streaming_buf = ""
         self._writer: TuiWriter | None = None
         self._in_decision_phase = False
         self._decision_event: threading.Event | None = None
@@ -237,6 +238,7 @@ class AutoplannerApp(App):
 
     def render_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
         """Render a decision block in the output log."""
+        self._flush_streaming_buf()
         log = self.query_one("#log", RichLog)
         log.write(Text(""))
 
@@ -280,6 +282,7 @@ class AutoplannerApp(App):
         self, valid_keys: list[str], prompt_text: str, event: threading.Event,
     ) -> None:
         """Set up the app to receive decision input (called on main thread)."""
+        self._flush_streaming_buf()
         self._in_decision_phase = True
         self._decision_valid_keys = valid_keys
         self._decision_event = event
@@ -403,19 +406,35 @@ class AutoplannerApp(App):
 
     def append_text(self, text: str) -> None:
         self._in_thinking = False
-        self._safe_write(Text(text), shrink=False)
+        self._streaming_buf += text
+        # Write complete lines; keep partial trailing line in buffer
+        while "\n" in self._streaming_buf:
+            line, self._streaming_buf = self._streaming_buf.split("\n", 1)
+            if line:
+                self._safe_write(Text(line), shrink=False)
+        # Flush if buffer grows large (no newline but lots of text)
+        if len(self._streaming_buf) >= 2048:
+            self._safe_write(Text(self._streaming_buf), shrink=False)
+            self._streaming_buf = ""
 
     def append_thinking(self, text: str) -> None:
         self._safe_write(Text(text, style="dim"), shrink=False)
 
     def start_thinking(self, label: str) -> None:
+        self._flush_streaming_buf()
         self._in_thinking = True
         self._safe_write(Text(f"💭 [{label}] thinking...", style="dim"))
 
     def end_thinking(self) -> None:
         self._in_thinking = False
 
+    def _flush_streaming_buf(self) -> None:
+        if self._streaming_buf:
+            self._safe_write(Text(self._streaming_buf), shrink=False)
+            self._streaming_buf = ""
+
     def append_status(self, text: str) -> None:
+        self._flush_streaming_buf()
         self._safe_write(text)
 
     def _handle_run_complete(self, result_path: Path) -> None:
