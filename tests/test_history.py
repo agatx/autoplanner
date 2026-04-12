@@ -179,6 +179,7 @@ class TestHistoryJson:
         h.run_id = "test-run-20260410"
         h.work_dir = work_dir
         h._lock_fd = None
+        h.decisions = {}
         h.records = [
             IterationRecord(iteration=1, phase="draft", author="claude", content="Draft v1"),
             IterationRecord(iteration=1, phase="review", author="codex", content="Needs work"),
@@ -195,6 +196,7 @@ class TestHistoryJson:
         assert loaded.records[0].content == "Draft v1"
         assert loaded.records[1].author == "codex"
         assert loaded.records[2].phase == "revision"
+        assert loaded.decisions == {}
 
 
 # ---------------------------------------------------------------------------

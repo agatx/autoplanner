@@ -13,6 +13,7 @@ from textual.binding import Binding
 from textual.widgets import RichLog, Input, Static
 
 from autoplanner import orchestrator
+from autoplanner.output import _parse_decision_input
 from autoplanner.debug import debug, heartbeat_start, heartbeat_stop
 from autoplanner.orchestrator import Reviewer
 from autoplanner.output import Writer, set_writer
@@ -84,6 +85,21 @@ class TuiWriter(Writer):
         self.flush_pending()
         self._app.call_from_thread(self._app.end_thinking)
 
+    def bell(self) -> None:
+        self._app.call_from_thread(self._app.bell)
+
+    def present_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
+        self.flush_pending()
+        self._app.call_from_thread(self._app.render_decision, decision, prior_decisions)
+
+    def await_decision_input(self, valid_keys: list[str], prompt_text: str) -> tuple[str, str]:
+        event = threading.Event()
+        self._app.call_from_thread(
+            self._app.begin_decision_input, valid_keys, prompt_text, event,
+        )
+        event.wait()
+        return self._app._decision_result
+
 
 class AutoplannerApp(App):
     AUTO_FOCUS = "#prompt-input"
@@ -122,6 +138,9 @@ class AutoplannerApp(App):
         skip_to_walkthrough: str | None = None,
         ingest: str | None = None,
         continue_run: str | None = None,
+        human_review: bool = False,
+        on_decision_policy: str = "prompt",
+        on_parse_error_policy: str = "warn",
     ) -> None:
         super().__init__()
         self._initial_task = task
@@ -134,10 +153,18 @@ class AutoplannerApp(App):
         self._skip_to_walkthrough = skip_to_walkthrough
         self._ingest = ingest
         self._continue_run = continue_run
+        self._human_review = human_review
+        self._on_decision_policy = on_decision_policy
+        self._on_parse_error_policy = on_parse_error_policy
         self._steering = QueueSteering()
         self._running = False
         self._in_thinking = False
+        self._streaming_buf = ""
         self._writer: TuiWriter | None = None
+        self._in_decision_phase = False
+        self._decision_event: threading.Event | None = None
+        self._decision_result: tuple[str, str] | None = None
+        self._decision_valid_keys: list[str] | None = None
 
     def compose(self) -> ComposeResult:
         yield OutputLog(id="log", wrap=True, highlight=True, markup=True)
@@ -173,12 +200,96 @@ class AutoplannerApp(App):
 
         log = self.query_one("#log", RichLog)
 
+        if self._in_decision_phase:
+            self._handle_decision_input(text, log)
+            return
+
         if not self._running:
             self._start_run(text)
             event.input.placeholder = "Type steering instructions (Enter to send)..."
         else:
-            log.write(Text(f"[you] {text}", style="bold magenta"))
+            log.write(Text(f"> {text}", style="cyan"))
             self._steering.put(text)
+
+    def _handle_decision_input(self, text: str, log: RichLog) -> None:
+        """Validate and accept decision input, or treat as a question."""
+        result = _parse_decision_input(text, self._decision_valid_keys)
+
+        log.write(Text(f"> {text}", style="cyan"))
+
+        if result is not None:
+            key = result[0]
+            if key == "options":
+                # Re-display handled by orchestrator
+                self._decision_result = result
+                self._decision_event.set()
+                return
+            # Valid choice (including custom) — resolve and exit decision phase
+            self._decision_result = result
+            self._in_decision_phase = False
+            self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
+            self._decision_event.set()
+        else:
+            # Question — send to worker thread for discussion
+            self._decision_result = ("", text)
+            inp = self.query_one("#prompt-input", Input)
+            inp.disabled = True
+            self._decision_event.set()
+
+    def render_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
+        """Render a decision block in the output log."""
+        self._flush_streaming_buf()
+        log = self.query_one("#log", RichLog)
+        log.write(Text(""))
+
+        if prior_decisions:
+            log.write(Text("Previously locked:", style="dim"))
+            for pd in prior_decisions:
+                if pd.get("resolution"):
+                    log.write(Text(
+                        f"{pd['id']} — {pd['resolution']['locked_direction']}",
+                        style="dim",
+                    ))
+            log.write(Text(""))
+
+        conflict_note = f" (challenges {decision['conflict_with']})" if decision.get("conflict_with") else ""
+        log.write(Text(f"Decision: {decision['title']}{conflict_note}", style="bold cyan"))
+        log.write(Text(decision.get("summary", "")))
+        log.write(Text(""))
+
+        for i, opt in enumerate(decision.get("options", [])):
+            if i > 0:
+                log.write(Text(""))
+            current_mark = Text(" \u25c0 current", style="bright_blue") if opt["key"] == decision.get("current_choice") else Text("")
+            effect_note = Text(f" [{opt['effect']}]", style="yellow") if opt.get("effect") else Text("")
+            header = Text(f"[{opt['key']}] {opt['label']}", style="bold")
+            header.append_text(current_mark)
+            header.append_text(effect_note)
+            log.write(header)
+            if opt.get("description"):
+                log.write(Text(opt["description"], style="dim"))
+            pros_line = Text()
+            pros_line.append("Pros: ", style="green")
+            pros_line.append(opt.get("pros", ""), style="dim")
+            log.write(pros_line)
+            cons_line = Text()
+            cons_line.append("Cons: ", style="red")
+            cons_line.append(opt.get("cons", ""), style="dim")
+            log.write(cons_line)
+        log.write(Text(""))
+
+    def begin_decision_input(
+        self, valid_keys: list[str], prompt_text: str, event: threading.Event,
+    ) -> None:
+        """Set up the app to receive decision input (called on main thread)."""
+        self._flush_streaming_buf()
+        self._in_decision_phase = True
+        self._decision_valid_keys = valid_keys
+        self._decision_event = event
+        self._decision_result = None
+        inp = self.query_one("#prompt-input", Input)
+        inp.disabled = False
+        inp.placeholder = prompt_text
 
     def _start_run(self, task: str) -> None:
         self._running = True
@@ -211,6 +322,9 @@ class AutoplannerApp(App):
                 codex_effort=self._codex_effort,
                 reviewer=self._reviewer,
                 steering_source=self._steering,
+                human_review=self._human_review,
+                on_decision_policy=self._on_decision_policy,
+                on_parse_error_policy=self._on_parse_error_policy,
                 **extra_kwargs,
             )
             if self._writer is not None:
@@ -292,19 +406,35 @@ class AutoplannerApp(App):
 
     def append_text(self, text: str) -> None:
         self._in_thinking = False
-        self._safe_write(Text(text), shrink=False)
+        self._streaming_buf += text
+        # Write complete lines; keep partial trailing line in buffer
+        while "\n" in self._streaming_buf:
+            line, self._streaming_buf = self._streaming_buf.split("\n", 1)
+            if line:
+                self._safe_write(Text(line), shrink=False)
+        # Flush if buffer grows large (no newline but lots of text)
+        if len(self._streaming_buf) >= 2048:
+            self._safe_write(Text(self._streaming_buf), shrink=False)
+            self._streaming_buf = ""
 
     def append_thinking(self, text: str) -> None:
         self._safe_write(Text(text, style="dim"), shrink=False)
 
     def start_thinking(self, label: str) -> None:
+        self._flush_streaming_buf()
         self._in_thinking = True
         self._safe_write(Text(f"💭 [{label}] thinking...", style="dim"))
 
     def end_thinking(self) -> None:
         self._in_thinking = False
 
+    def _flush_streaming_buf(self) -> None:
+        if self._streaming_buf:
+            self._safe_write(Text(self._streaming_buf), shrink=False)
+            self._streaming_buf = ""
+
     def append_status(self, text: str) -> None:
+        self._flush_streaming_buf()
         self._safe_write(text)
 
     def _handle_run_complete(self, result_path: Path) -> None:

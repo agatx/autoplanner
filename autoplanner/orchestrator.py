@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import json
 import threading
 from enum import Enum
 from pathlib import Path
 
 from autoplanner.agents import claude_agent, codex_agent
 from autoplanner.agents.session import ClaudeSession, CodexSession
+from autoplanner.decisions import extract_decisions, strip_decisions_trailer
 from autoplanner.history import History, IterationRecord, make_run_id, make_output_name, find_run_dir
 from autoplanner.output import get_writer
 from autoplanner.prompts import load
 from autoplanner.steering import SteeringSource, StdinSteering
 
 AUTOPLANNER_DIR = ".autoplanner"
+MAX_DECISION_PASSES = 3
 
 
 def _close_sessions(sessions: list) -> None:
@@ -39,8 +42,17 @@ class Reviewer(str, Enum):
     CLAUDE = "claude"
 
 
-def is_done(review_text: str, iteration: int, max_iterations: int) -> bool:
+def is_done(
+    review_text: str, iteration: int, max_iterations: int,
+    *, has_proposed: bool = False, in_decision_pass: bool = False,
+) -> bool:
     w = get_writer()
+    if has_proposed:
+        w.write_status("[yellow]Unresolved decisions \u2014 cannot converge.[/yellow]")
+        return False
+    if in_decision_pass:
+        w.write_status("[dim]Post-decision incorporation pass \u2014 continuing.[/dim]")
+        return False
     if iteration >= max_iterations:
         w.write_status(f"[yellow]Reached max iterations ({max_iterations}), stopping.[/yellow]")
         return True
@@ -81,6 +93,8 @@ def _do_review(
     *,
     max_iterations: int = 5,
     steering: str | None = None,
+    human_review: bool = False,
+    locked_decisions: list[dict] | None = None,
 ) -> tuple[str, str]:
     w = get_writer()
     if active_reviewer == Reviewer.CODEX:
@@ -89,6 +103,7 @@ def _do_review(
             text = codex_agent.review(
                 codex_session, document, task, iteration,
                 max_iterations=max_iterations, steering=steering,
+                human_review=human_review, locked_decisions=locked_decisions,
             )
             return text, "codex"
         except RuntimeError as e:
@@ -98,8 +113,142 @@ def _do_review(
     text = claude_agent.review(
         claude_review_session, document, task, iteration,
         max_iterations=max_iterations, steering=steering,
+        human_review=human_review, locked_decisions=locked_decisions,
     )
     return text, "claude"
+
+
+def _options_presented(decision: dict) -> list[dict]:
+    return [{"key": o["key"], "label": o["label"]} for o in decision["options"]]
+
+
+def _build_resolution(chosen_key: str, note: str, decision: dict) -> dict:
+    chosen_option = next(o for o in decision["options"] if o["key"] == chosen_key)
+    locked_direction = f"Use {chosen_option['label']}."
+    if note:
+        locked_direction += f" Note: {note}"
+    return {
+        "decision_id": decision["id"],
+        "title": decision["title"],
+        "options_presented": _options_presented(decision),
+        "chosen_key": chosen_key,
+        "chosen_label": chosen_option["label"],
+        "chosen_effect": chosen_option.get("effect"),
+        "note": note,
+        "locked_direction": locked_direction,
+    }
+
+
+def _build_custom_resolution(decision: dict, note: str) -> dict:
+    return {
+        "decision_id": decision["id"],
+        "title": decision["title"],
+        "options_presented": _options_presented(decision),
+        "chosen_key": "custom",
+        "chosen_label": "Custom answer",
+        "chosen_effect": None,
+        "note": note,
+        "locked_direction": note,
+    }
+
+
+def _handle_parse_error(policy: str, w) -> None:
+    if policy == "fail":
+        w.write_status("[red]Decision trailer parse error \u2014 aborting (--on-parse-error=fail)[/red]")
+        raise SystemExit(1)
+    w.write_status(
+        "[yellow]Decision trailer parse error \u2014 continuing without decisions "
+        "(--on-parse-error=warn)[/yellow]"
+    )
+
+
+def _resolve_decisions(
+    decisions: list[dict],
+    history: History,
+    on_decision_policy: str,
+    w,
+    iteration: int,
+    writer_session: ClaudeSession | None = None,
+    already_proposed: bool = False,
+) -> bool:
+    """Present and resolve proposed decisions.  Returns True if any were resolved."""
+    w.bell()
+    resolved_any = False
+    discussed: set[str] = set()
+    for d in decisions:
+        if not already_proposed and not history.propose_decision(d):
+            w.write_status(f"  Decision skipped (duplicate of active {d['id']})")
+            continue
+
+        if on_decision_policy == "fail":
+            w.write_status("[red]Run aborted: unresolved decisions[/red]")
+            raise SystemExit(1)
+
+        prior = history.active_decisions()
+        w.present_decision(d, prior)
+        w.write_status(f"  Awaiting human input for decision: {d['title']}")
+
+        if on_decision_policy == "accept":
+            chosen_key = d["current_choice"]
+            note = ""
+            resolution = _build_resolution(chosen_key, note, d)
+            w.write_status(f"  [yellow]Decision auto-accepted: {d['id']} \u2014 {chosen_key}[/yellow]")
+        else:  # "prompt"
+            valid_keys = [opt["key"] for opt in d["options"]]
+            keys_str = " ".join(f"/{k}" for k in valid_keys)
+            prompt_text = (
+                f"{keys_str}  /skip  /custom  /options  — or ask a question "
+                f"[{d['title']}]"
+            )
+            while True:
+                chosen_key, text = w.await_decision_input(valid_keys + ["skip"], prompt_text)
+                if chosen_key == "options":
+                    w.present_decision(d, history.active_decisions())
+                    continue
+                if chosen_key == "custom":
+                    if not text:
+                        w.write_status("  [dim]Usage: /custom <your answer>[/dim]")
+                        continue
+                    resolution = _build_custom_resolution(d, text)
+                    break
+                if chosen_key != "":
+                    if chosen_key == "skip":
+                        chosen_key = d["current_choice"]
+                    note = text
+                    resolution = _build_resolution(chosen_key, note, d)
+                    break
+                # Question — discuss with the document author
+                if writer_session is not None:
+                    w.write_status("  [bold cyan]Author responding...[/bold cyan]")
+                    first_ask = d["id"] not in discussed
+                    try:
+                        claude_agent.discuss(writer_session, d, text, first_ask=first_ask)
+                    except Exception as e:
+                        w.write_status(f"  [red]Chat error: {e}[/red]")
+                    discussed.add(d["id"])
+                else:
+                    w.write_status("  [dim]Chat not available in this mode[/dim]")
+
+        history.lock_decision(d["id"], resolution)
+        history.add(IterationRecord(
+            iteration=iteration, phase="decision",
+            author="human", content=json.dumps(resolution),
+        ))
+        w.write_status(f"  Decision locked: {d['id']} \u2014 {resolution['locked_direction']}")
+
+        if d.get("conflict_with"):
+            if resolution.get("chosen_effect") == "supersede":
+                w.write_status(
+                    f"  Decision superseded: {d['conflict_with']} (replaced by {d['id']})"
+                )
+            else:
+                w.write_status(
+                    f"  Decision kept: {d['conflict_with']} "
+                    f"(conflict {d['id']} resolved with keep_original)"
+                )
+
+        resolved_any = True
+    return resolved_any
 
 
 def run(
@@ -114,6 +263,9 @@ def run(
     steering_source: SteeringSource | None = None,
     skip_to_walkthrough: str | None = None,
     ingest: str | None = None,
+    human_review: bool = False,
+    on_decision_policy: str = "prompt",
+    on_parse_error_policy: str = "warn",
 ) -> Path:
     cwd = Path.cwd()
 
@@ -153,6 +305,9 @@ def run(
             reviewer=reviewer,
             steering=steering_source,
             initial_document=initial_document,
+            human_review=human_review,
+            on_decision_policy=on_decision_policy,
+            on_parse_error_policy=on_parse_error_policy,
         )
     finally:
         history.release()
@@ -173,6 +328,9 @@ def resume(
     codex_effort: str = "",
     reviewer: Reviewer = Reviewer.AUTO,
     steering_source: SteeringSource | None = None,
+    human_review: bool = False,
+    on_decision_policy: str = "prompt",
+    on_parse_error_policy: str = "warn",
 ) -> Path:
     """Resume a previous run from where it left off."""
     cwd = Path.cwd()
@@ -231,6 +389,9 @@ def resume(
             initial_review=last_review,
             start_iteration=start_iteration,
             resume_skip_write=skip_write,
+            human_review=human_review,
+            on_decision_policy=on_decision_policy,
+            on_parse_error_policy=on_parse_error_policy,
         )
     finally:
         history.release()
@@ -288,6 +449,9 @@ def _run_loop(
     initial_review: str = "",
     start_iteration: int = 1,
     resume_skip_write: bool = False,
+    human_review: bool = False,
+    on_decision_policy: str = "prompt",
+    on_parse_error_policy: str = "warn",
 ) -> Path:
     w = get_writer()
     steering.start()
@@ -296,6 +460,8 @@ def _run_loop(
     w.write_status(f"[dim]Work dir: {history.work_dir}[/dim]")
     w.write_status(f"[dim]Writer: {writer_session.model} (effort: {writer_session.effort})[/dim]")
     w.write_status(f"[dim]Codex:  {codex_session.model} (effort: {codex_session.effort})[/dim]")
+    if human_review:
+        w.write_status(f"[dim]Human review: enabled (on-decision={on_decision_policy})[/dim]")
 
     active_reviewer = _resolve_reviewer(reviewer)
     w.write_status(f"[dim]Reviewer: {active_reviewer.value}[/dim]")
@@ -303,7 +469,40 @@ def _run_loop(
     document = ""
     review_text = initial_review
 
-    for iteration in range(start_iteration, max_iterations + 1):
+    # --- Resume: resolve any pending decisions from prior run ---
+    if human_review and history.has_proposed():
+        pending = history.pending_decisions()
+        w.write_status(f"  Resuming with {len(pending)} pending decision(s) from prior run")
+        _resolve_decisions(
+            pending, history, on_decision_policy, w, start_iteration,
+            writer_session=None, already_proposed=True,
+        )
+
+    # Decision-pass tracking
+    decision_passes_used = 0
+    force_decision_continue = False
+
+    iteration = start_iteration
+    while iteration <= max_iterations or force_decision_continue:
+        # Check decision-pass budget when extending beyond max_iterations
+        if force_decision_continue and iteration > max_iterations:
+            decision_passes_used += 1
+            if decision_passes_used > MAX_DECISION_PASSES:
+                n_pending = sum(1 for d in history.decisions.values() if d["state"] == "proposed")
+                w.write_status(
+                    f"[yellow]Decision pass budget exhausted ({MAX_DECISION_PASSES} passes). "
+                    f"Stopping with {n_pending} unresolved decision(s). "
+                    f"Resume with -c to continue.[/yellow]"
+                )
+                history.save_json()
+                raise SystemExit(2)
+            w.write_status(
+                f"  Post-decision incorporation pass {decision_passes_used}/{MAX_DECISION_PASSES}"
+            )
+            force_decision_continue = False
+
+        locked = history.active_decisions() if human_review else None
+
         # --- Pre-phase steering ---
         user_steering = steering.drain()
         if user_steering:
@@ -311,8 +510,6 @@ def _run_loop(
 
         # --- Draft or Revise ---
         if resume_skip_write and iteration == start_iteration:
-            # Resuming a run that had a draft but no review — skip to review.
-            # Don't re-save: the document already exists in history.
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Resuming from prior draft...")
             document = initial_document
             skip_history_save = True
@@ -326,7 +523,7 @@ def _run_loop(
             document = claude_agent.revise(
                 writer_session, initial_document, review_text,
                 iteration=iteration, max_iterations=max_iterations,
-                steering=user_steering,
+                steering=user_steering, locked_decisions=locked,
             )
             phase = "revision"
             skip_history_save = False
@@ -340,7 +537,7 @@ def _run_loop(
             document = claude_agent.revise(
                 writer_session, document, review_text,
                 iteration=iteration, max_iterations=max_iterations,
-                steering=user_steering,
+                steering=user_steering, locked_decisions=locked,
             )
             phase = "revision"
             skip_history_save = False
@@ -348,7 +545,7 @@ def _run_loop(
         # --- Immediate correction if steering arrived during draft/revise ---
         mid_steering = steering.drain()
         if mid_steering:
-            w.write_status(f"  [bold magenta]Mid-phase steering — applying correction:[/bold magenta] {mid_steering}")
+            w.write_status(f"  [bold magenta]Mid-phase steering \u2014 applying correction:[/bold magenta] {mid_steering}")
             document = claude_agent.correct(writer_session, mid_steering)
             phase = "revision"
             skip_history_save = False
@@ -373,27 +570,48 @@ def _run_loop(
             document, task, iteration,
             max_iterations=max_iterations,
             steering=user_steering,
+            human_review=human_review,
+            locked_decisions=locked,
         )
 
         # --- Immediate correction if steering arrived during review ---
         mid_steering = steering.drain()
         if mid_steering:
-            w.write_status(f"  [bold magenta]Mid-review steering — applying correction:[/bold magenta] {mid_steering}")
+            w.write_status(f"  [bold magenta]Mid-review steering \u2014 applying correction:[/bold magenta] {mid_steering}")
             document = claude_agent.correct(writer_session, mid_steering)
-            # Re-save the corrected document
             history.add(IterationRecord(
                 iteration=iteration,
                 phase="revision",
                 author="claude",
                 content=document,
             ))
-            # Re-review with the corrected document
             w.write_status("  Re-reviewing corrected document...")
             review_text, review_author = _do_review(
                 active_reviewer, codex_session, claude_review_session,
                 document, task, iteration,
                 max_iterations=max_iterations,
+                human_review=human_review,
+                locked_decisions=locked,
             )
+
+        # --- Decision extraction (before storing review) ---
+        force_decision_continue = False
+        if human_review:
+            status, raw_decisions = extract_decisions(review_text, history.decisions)
+            if status == "parse_error":
+                _handle_parse_error(on_parse_error_policy, w)
+            elif status == "present" and raw_decisions:
+                w.write_status(
+                    f"  Decision trailer parsed: {len(raw_decisions)} high-stakes decision(s) detected"
+                )
+                force_decision_continue = _resolve_decisions(
+                    raw_decisions, history, on_decision_policy, w, iteration,
+                    writer_session=writer_session,
+                )
+            elif status == "none":
+                w.write_status("  Decision trailer parsed: no decisions")
+            # Strip trailer before storing
+            review_text = strip_decisions_trailer(review_text)
 
         history.add(IterationRecord(
             iteration=iteration,
@@ -403,8 +621,14 @@ def _run_loop(
         ))
         w.write_status(f"  Review received from {review_author} ({len(review_text)} chars)")
 
-        if is_done(review_text, iteration, max_iterations):
+        if is_done(
+            review_text, iteration, max_iterations,
+            has_proposed=history.has_proposed() if human_review else False,
+            in_decision_pass=force_decision_continue,
+        ):
             break
+
+        iteration += 1
 
     steering.stop()
 

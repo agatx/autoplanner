@@ -8,6 +8,8 @@ Analyze the iteration history below and write a concise, insightful walkthrough 
 4. **Unresolved Items** — Anything the reviewers flagged that was NOT addressed, or open questions that remain.
 5. **Attribution** — Which agent (Claude/Codex) contributed what. Who drove which decisions?
 
+If the iteration history includes records with phase "decision" and author "human", these represent human-locked architectural directions made during a human-in-the-loop review. Narrate them as deliberate choices: what was at stake, what the human chose, and how the document evolved to incorporate the choice. If a decision was later superseded, explain the original choice, the conflict that arose, and the new direction taken.
+
 Be analytical, not descriptive. The reader has access to the full document — they want to understand the REASONING behind its evolution, not read it again.
 
 Task: {task}

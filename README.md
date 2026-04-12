@@ -74,6 +74,9 @@ Type `q`, `quit`, or Ctrl+C to exit. After a run completes, you can start a new 
 | `-c` / `--continue` | — | Resume a previous run. `last` for most recent, or a run directory name (substring match supported) |
 | `--ingest` | — | Path to a markdown file to use as the initial draft (skips drafting) |
 | `--skip-to-walkthrough` | — | Path to a `.autoplanner` run directory; skips draft/review and regenerates the walkthrough only |
+| `-H` / `--human-review` | off | Enable human-in-the-loop review of high-stakes architectural decisions |
+| `--on-decision` | auto | Decision resolution policy: `prompt` (interactive), `accept` (auto-accept), `fail` (abort). Default: `prompt` if TTY, `fail` otherwise |
+| `--on-parse-error` | auto | Parse error policy: `warn` (continue) or `fail` (abort). Default: `warn` if TTY, `fail` otherwise |
 | `--debug` | off | Enable diagnostic logging to `autoplanner-debug.log` |
 
 ### Examples
@@ -99,6 +102,12 @@ autoplanner -c db-migration
 
 # Regenerate walkthrough for an earlier run
 autoplanner --skip-to-walkthrough .autoplanner/db-migration-20260409-120000 "Database migration"
+
+# Human-in-the-loop: pause on high-stakes decisions
+autoplanner -H "Design a caching layer"
+
+# Auto-accept decisions in CI (no human prompt)
+autoplanner --headless -H --on-decision accept "Design a caching layer"
 ```
 
 ## Output
@@ -160,6 +169,24 @@ autoplanner -c last -n 10    # resume with a higher iteration cap
 
 Resume loads `history.json` from the run's work directory, determines the last completed phase, and continues the draft-review loop from there. New sessions are created (conversation context doesn't carry over), but the document and review state are restored.
 
+## Human-in-the-loop review
+
+With `-H` / `--human-review`, the reviewer is instructed to identify high-stakes architectural decisions — technology choices, data model designs, security boundaries — and emit them as structured decision records. When decisions are detected, the loop pauses and presents each decision to the human one at a time with options, trade-offs, and the document's current choice.
+
+The human picks an option (e.g., `B`) or types `skip` to accept the current choice. An optional note can follow the key (e.g., `B — but keep a TTL fallback for cold starts`). Anything else is treated as a question — the document author (Claude) will explain its reasoning and trade-offs before you commit. You can ask as many follow-up questions before picking an option. The choice is recorded as a **locked decision** — a binding constraint injected into all subsequent writer and reviewer prompts.
+
+If the reviewer later identifies a conflict with a locked decision, it can raise a conflict proposal. The human resolves conflicts the same way, choosing to supersede the original or keep it.
+
+Decision-driven extra iterations (to incorporate locked choices) do not count against `--max-iter`. They are capped separately at 3 passes. If the budget is exhausted, the run terminates with exit code 2 and pending decisions are preserved for resume with `-c`.
+
+### Headless policies
+
+| `--on-decision` | Behavior |
+|---|---|
+| `prompt` (default with TTY) | Print decisions to stdout, read from stdin |
+| `accept` | Auto-accept the document's current choice |
+| `fail` | Abort with non-zero exit code |
+
 ## Resilience
 
 - **Transient errors** (overloaded, 529, 503, rate limits) are retried up to 3 times with exponential backoff (15s, 30s, 60s).
@@ -197,7 +224,8 @@ autoplanner/
   output.py          Pluggable writer protocol (terminal vs TUI)
   steering.py        Live steering input (stdin or TUI queue)
   prompts.py         Cached prompt template loader
-  history.py         Iteration records, file persistence, JSON export
+  history.py         Iteration records, decision state, file persistence, JSON export
+  decisions.py       Decision trailer extraction and validation
   debug.py           Opt-in diagnostic logging and event-loop heartbeat
   agents/
     session.py       Persistent subprocess sessions (Claude + Codex CLIs)
@@ -208,4 +236,5 @@ autoplanner/
     revise.txt
     review.txt
     walkthrough.txt
+    decisions_instruction.txt
 ```
