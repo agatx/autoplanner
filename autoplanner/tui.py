@@ -13,6 +13,7 @@ from textual.binding import Binding
 from textual.widgets import RichLog, Input, Static
 
 from autoplanner import orchestrator
+from autoplanner.output import _parse_decision_input
 from autoplanner.debug import debug, heartbeat_start, heartbeat_stop
 from autoplanner.orchestrator import Reviewer
 from autoplanner.output import Writer, set_writer
@@ -206,36 +207,33 @@ class AutoplannerApp(App):
             self._start_run(text)
             event.input.placeholder = "Type steering instructions (Enter to send)..."
         else:
-            log.write(Text(f"[you] {text}", style="bold magenta"))
+            log.write(Text(f"> {text}", style="cyan"))
             self._steering.put(text)
 
     def _handle_decision_input(self, text: str, log: RichLog) -> None:
-        """Validate and accept decision input."""
-        parts = text.split(None, 1)
-        key = parts[0].upper()
-        note = ""
-        if len(parts) > 1:
-            rest = parts[1]
-            for sep in ("\u2014", "--", "-"):
-                if rest.startswith(sep):
-                    rest = rest[len(sep):].strip()
-                    break
-            note = rest
+        """Validate and accept decision input, or treat as a question."""
+        result = _parse_decision_input(text, self._decision_valid_keys)
 
-        if key.lower() == "skip":
-            key = "skip"
-        elif key not in self._decision_valid_keys:
-            log.write(Text(
-                f"Invalid choice '{key}'. Valid: {', '.join(self._decision_valid_keys)}",
-                style="bold red",
-            ))
-            return
+        log.write(Text(f"> {text}", style="cyan"))
 
-        log.write(Text(f"[you] {text}", style="bold magenta"))
-        self._decision_result = (key, note)
-        self._in_decision_phase = False
-        self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
-        self._decision_event.set()
+        if result is not None:
+            key = result[0]
+            if key == "options":
+                # Re-display handled by orchestrator
+                self._decision_result = result
+                self._decision_event.set()
+                return
+            # Valid choice (including custom) — resolve and exit decision phase
+            self._decision_result = result
+            self._in_decision_phase = False
+            self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
+            self._decision_event.set()
+        else:
+            # Question — send to worker thread for discussion
+            self._decision_result = ("", text)
+            inp = self.query_one("#prompt-input", Input)
+            inp.disabled = True
+            self._decision_event.set()
 
     def render_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
         """Render a decision block in the output log."""
@@ -276,6 +274,7 @@ class AutoplannerApp(App):
             cons_line.append("Cons: ", style="red")
             cons_line.append(opt.get("cons", ""), style="dim")
             log.write(cons_line)
+        log.write(Text(""))
 
     def begin_decision_input(
         self, valid_keys: list[str], prompt_text: str, event: threading.Event,
@@ -285,7 +284,9 @@ class AutoplannerApp(App):
         self._decision_valid_keys = valid_keys
         self._decision_event = event
         self._decision_result = None
-        self.query_one("#prompt-input", Input).placeholder = prompt_text
+        inp = self.query_one("#prompt-input", Input)
+        inp.disabled = False
+        inp.placeholder = prompt_text
 
     def _start_run(self, task: str) -> None:
         self._running = True

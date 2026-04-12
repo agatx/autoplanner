@@ -54,12 +54,15 @@ Tests cover pure logic only — no subprocess mocking, no TUI rendering. The sui
 | `test_session_helpers.py` | `_is_transient` (transient vs permanent errors), `steering_block` formatting |
 | `test_decisions.py` | `extract_decisions`: trailer parsing, schema validation, conflict validation, strip trailer |
 | `test_history_decisions.py` | Decision state machine: propose, lock, supersede, keep_original, active/pending queries, JSON round-trip |
+| `test_decision_chat.py` | `_parse_decision_input` (choice vs question detection), `discuss` prompt formatting |
 
 ## Architecture
 
 ### Orchestrator loop (`orchestrator.py`)
 
 The core loop in `_run_loop` drives: draft (iteration 1) -> review -> revise (iteration 2+) -> review -> ... -> walkthrough. The `is_done` function terminates on LGTM prefix or max iterations. Steering input is drained at three points per iteration (pre-phase, mid-draft/revise, mid-review) and triggers corrections via `claude_agent.correct()`.
+
+During HITL decision review, users can ask questions about options before choosing. Questions are sent to the writer session via `claude_agent.discuss()`, which streams responses through the normal output pipeline. Choice vs question is determined by strict input parsing: key alone or key + separator = choice; anything else = question. Chat context persists in the writer session, informing subsequent revisions.
 
 ### Session model (`agents/session.py`)
 

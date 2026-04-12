@@ -105,21 +105,7 @@ MOCK_DECISIONS = [
 ]
 
 
-def _build_resolution(chosen_key, note, decision):
-    """Mirror of orchestrator._build_resolution."""
-    chosen_option = next(o for o in decision["options"] if o["key"] == chosen_key)
-    locked_direction = f"Use {chosen_option['label']}."
-    if note:
-        locked_direction += f" Note: {note}"
-    return {
-        "decision_id": decision["id"],
-        "title": decision["title"],
-        "chosen_key": chosen_key,
-        "chosen_label": chosen_option["label"],
-        "chosen_effect": chosen_option.get("effect"),
-        "note": note,
-        "locked_direction": locked_direction,
-    }
+from autoplanner.orchestrator import _build_resolution, _build_custom_resolution
 
 
 def run_terminal_demo():
@@ -132,7 +118,7 @@ def run_terminal_demo():
     prior_decisions = []
 
     c.print("\n[bold]===  Decision UI Demo (Terminal Mode)  ===[/bold]")
-    c.print("[dim]This walks through 3 mock decisions. Try valid keys, 'skip',\ninvalid input, and notes (e.g. 'B -- but only for writes').[/dim]\n")
+    c.print("[dim]This walks through 3 mock decisions. Use /A, /B, /skip, /custom,\n/options, or type a question (e.g. 'Why option A?').[/dim]\n")
 
     w.bell()
     for i, decision in enumerate(MOCK_DECISIONS):
@@ -140,16 +126,31 @@ def run_terminal_demo():
         w.present_decision(decision, prior_decisions)
 
         valid_keys = [opt["key"] for opt in decision["options"]]
+        keys_str = " ".join(f"/{k}" for k in valid_keys)
         prompt_text = (
-            f"Pick {'/'.join(valid_keys)} or 'skip' "
-            f"[decision {i+1}/{len(MOCK_DECISIONS)}: {decision['title']}]"
+            f"{keys_str}  /skip  /custom  /options  — or ask a question "
+            f"[{decision['title']}]"
         )
-        chosen_key, note = w.await_decision_input(valid_keys + ["skip"], prompt_text)
+        while True:
+            chosen_key, note = w.await_decision_input(valid_keys + ["skip"], prompt_text)
+            if chosen_key == "options":
+                w.present_decision(decision, prior_decisions)
+                continue
+            if chosen_key == "custom":
+                if not note:
+                    c.print("[dim]  Usage: /custom <your answer>[/dim]")
+                    continue
+                break
+            if chosen_key != "":
+                break
+            c.print("[dim]  Chat not available in demo mode. Use /A, /B, etc.[/dim]")
 
-        if chosen_key == "skip":
-            chosen_key = decision["current_choice"]
-
-        resolution = _build_resolution(chosen_key, note, decision)
+        if chosen_key == "custom":
+            resolution = _build_custom_resolution(decision, note)
+        else:
+            if chosen_key == "skip":
+                chosen_key = decision["current_choice"]
+            resolution = _build_resolution(chosen_key, note, decision)
         c.print(f"\n  [green]Locked:[/green] {resolution['locked_direction']}")
 
         prior_decisions.append({
@@ -265,32 +266,27 @@ def run_tui_demo():
             log.write(Text(f"[you] {text}", style="bold magenta"))
 
         def _handle_decision_input(self, text: str) -> None:
+            from autoplanner.output import _parse_decision_input
             log = self.query_one("#log", RichLog)
-            parts = text.split(None, 1)
-            key = parts[0].upper()
-            note = ""
-            if len(parts) > 1:
-                rest = parts[1]
-                for sep in ("\u2014", "--", "-"):
-                    if rest.startswith(sep):
-                        rest = rest[len(sep):].strip()
-                        break
-                note = rest
+            result = _parse_decision_input(text, self._decision_valid_keys)
 
-            if key.lower() == "skip":
-                key = "skip"
-            elif key not in self._decision_valid_keys:
+            log.write(Text(f"> {text}", style="cyan"))
+
+            if result is not None:
+                key = result[0]
+                if key == "options":
+                    self._decision_result = result
+                    self._decision_event.set()
+                    return
+                self._decision_result = result
+                self._in_decision_phase = False
+                self.query_one("#prompt-input", Input).placeholder = "Waiting for next decision..."
+                self._decision_event.set()
+            else:
                 log.write(Text(
-                    f"Invalid choice '{key}'. Valid: {', '.join(self._decision_valid_keys)}",
-                    style="bold red",
+                    "Chat not available in demo mode. Use /A, /B, etc.",
+                    style="dim",
                 ))
-                return
-
-            log.write(Text(f"[you] {text}", style="bold magenta"))
-            self._decision_result = (key, note)
-            self._in_decision_phase = False
-            self.query_one("#prompt-input", Input).placeholder = "Waiting for next decision..."
-            self._decision_event.set()
 
         # --- Decision rendering (same as AutoplannerApp) ---
 
@@ -337,6 +333,7 @@ def run_tui_demo():
                 cons_line.append("Cons: ", style="red")
                 cons_line.append(opt.get("cons", ""), style="dim")
                 log.write(cons_line)
+            log.write(Text(""))
 
         def begin_decision_input(self, valid_keys, prompt_text, event):
             self._in_decision_phase = True
@@ -370,18 +367,36 @@ def run_tui_demo():
                 w.present_decision(decision, prior_decisions)
 
                 valid_keys = [opt["key"] for opt in decision["options"]]
+                keys_str = " ".join(f"/{k}" for k in valid_keys)
                 prompt_text = (
-                    f"Pick {'/'.join(valid_keys)} or 'skip' "
-                    f"[decision {i+1}/{len(MOCK_DECISIONS)}: {decision['title']}]"
+                    f"{keys_str}  /skip  /custom  /options  — or ask a question "
+                    f"[{decision['title']}]"
                 )
-                chosen_key, note = w.await_decision_input(
-                    valid_keys + ["skip"], prompt_text,
-                )
+                while True:
+                    chosen_key, note = w.await_decision_input(
+                        valid_keys + ["skip"], prompt_text,
+                    )
+                    if chosen_key == "options":
+                        w.present_decision(decision, prior_decisions)
+                        continue
+                    if chosen_key == "custom":
+                        if not note:
+                            w.write_status("[dim]  Usage: /custom <your answer>[/dim]")
+                            continue
+                        break
+                    if chosen_key != "":
+                        break
+                    w.write_status(
+                        "[dim]  Chat not available in demo mode. "
+                        "Use /A, /B, etc.[/dim]"
+                    )
 
-                if chosen_key == "skip":
-                    chosen_key = decision["current_choice"]
-
-                resolution = _build_resolution(chosen_key, note, decision)
+                if chosen_key == "custom":
+                    resolution = _build_custom_resolution(decision, note)
+                else:
+                    if chosen_key == "skip":
+                        chosen_key = decision["current_choice"]
+                    resolution = _build_resolution(chosen_key, note, decision)
                 w.write_status(
                     f"  [green]Decision locked: {decision['id']} — "
                     f"{resolution['locked_direction']}[/green]"

@@ -57,6 +57,34 @@ def correct(session: ClaudeSession, feedback: str) -> str:
     return _extract_markdown(session.send(prompt))
 
 
+def discuss(
+    session: ClaudeSession,
+    decision: dict,
+    question: str,
+    *,
+    first_ask: bool = True,
+) -> str:
+    """Answer a user question about a decision during HITL review."""
+    if first_ask:
+        options_text = "\n".join(
+            f"- [{o['key']}] {o['label']}: {o['description']}"
+            for o in decision["options"]
+        )
+        prompt = load("discuss_decision.txt").format(
+            title=decision["title"],
+            summary=decision["summary"],
+            options=options_text,
+            current_choice=decision["current_choice"],
+            question=question,
+        )
+    else:
+        prompt = (
+            f"Continuing our discussion about the '{decision['title']}' decision.\n\n"
+            f"Human's follow-up: {question}"
+        )
+    return session.send(prompt)
+
+
 def review(
     session: ClaudeSession,
     document: str,

@@ -118,6 +118,10 @@ def _do_review(
     return text, "claude"
 
 
+def _options_presented(decision: dict) -> list[dict]:
+    return [{"key": o["key"], "label": o["label"]} for o in decision["options"]]
+
+
 def _build_resolution(chosen_key: str, note: str, decision: dict) -> dict:
     chosen_option = next(o for o in decision["options"] if o["key"] == chosen_key)
     locked_direction = f"Use {chosen_option['label']}."
@@ -126,12 +130,25 @@ def _build_resolution(chosen_key: str, note: str, decision: dict) -> dict:
     return {
         "decision_id": decision["id"],
         "title": decision["title"],
-        "options_presented": [{"key": o["key"], "label": o["label"]} for o in decision["options"]],
+        "options_presented": _options_presented(decision),
         "chosen_key": chosen_key,
         "chosen_label": chosen_option["label"],
         "chosen_effect": chosen_option.get("effect"),
         "note": note,
         "locked_direction": locked_direction,
+    }
+
+
+def _build_custom_resolution(decision: dict, note: str) -> dict:
+    return {
+        "decision_id": decision["id"],
+        "title": decision["title"],
+        "options_presented": _options_presented(decision),
+        "chosen_key": "custom",
+        "chosen_label": "Custom answer",
+        "chosen_effect": None,
+        "note": note,
+        "locked_direction": note,
     }
 
 
@@ -151,10 +168,12 @@ def _resolve_decisions(
     on_decision_policy: str,
     w,
     iteration: int,
+    writer_session: ClaudeSession | None = None,
 ) -> bool:
     """Present and resolve proposed decisions.  Returns True if any were resolved."""
     w.bell()
     resolved_any = False
+    discussed: set[str] = set()
     for d in decisions:
         if not history.propose_decision(d):
             w.write_status(f"  Decision skipped (duplicate of active {d['id']})")
@@ -174,15 +193,40 @@ def _resolve_decisions(
             w.write_status(f"  [yellow]Decision auto-accepted: {d['id']} \u2014 {chosen_key}[/yellow]")
         else:  # "prompt"
             valid_keys = [opt["key"] for opt in d["options"]]
+            keys_str = " ".join(f"/{k}" for k in valid_keys)
             prompt_text = (
-                f"Pick {'/'.join(valid_keys)} or 'skip' "
-                f"[decision: {d['title']}]"
+                f"{keys_str}  /skip  /custom  /options  — or ask a question "
+                f"[{d['title']}]"
             )
-            chosen_key, note = w.await_decision_input(valid_keys + ["skip"], prompt_text)
-            if chosen_key == "skip":
-                chosen_key = d["current_choice"]
+            while True:
+                chosen_key, text = w.await_decision_input(valid_keys + ["skip"], prompt_text)
+                if chosen_key == "options":
+                    w.present_decision(d, history.active_decisions())
+                    continue
+                if chosen_key == "custom":
+                    if not text:
+                        w.write_status("  [dim]Usage: /custom <your answer>[/dim]")
+                        continue
+                    resolution = _build_custom_resolution(d, text)
+                    break
+                if chosen_key != "":
+                    if chosen_key == "skip":
+                        chosen_key = d["current_choice"]
+                    note = text
+                    resolution = _build_resolution(chosen_key, note, d)
+                    break
+                # Question — discuss with the document author
+                if writer_session is not None:
+                    w.write_status("  [bold cyan]Author responding...[/bold cyan]")
+                    first_ask = d["id"] not in discussed
+                    try:
+                        claude_agent.discuss(writer_session, d, text, first_ask=first_ask)
+                    except Exception as e:
+                        w.write_status(f"  [red]Chat error: {e}[/red]")
+                    discussed.add(d["id"])
+                else:
+                    w.write_status("  [dim]Chat not available in this mode[/dim]")
 
-        resolution = _build_resolution(chosen_key, note, d)
         history.lock_decision(d["id"], resolution)
         history.add(IterationRecord(
             iteration=iteration, phase="decision",
@@ -427,7 +471,8 @@ def _run_loop(
     if human_review and history.has_proposed():
         pending = history.pending_decisions()
         w.write_status(f"  Resuming with {len(pending)} pending decision(s) from prior run")
-        _resolve_decisions(pending, history, on_decision_policy, w, start_iteration)
+        _resolve_decisions(pending, history, on_decision_policy, w, start_iteration,
+                           writer_session=None)
 
     # Decision-pass tracking
     decision_passes_used = 0
@@ -557,6 +602,7 @@ def _run_loop(
                 )
                 force_decision_continue = _resolve_decisions(
                     raw_decisions, history, on_decision_policy, w, iteration,
+                    writer_session=writer_session,
                 )
             elif status == "none":
                 w.write_status("  Decision trailer parsed: no decisions")

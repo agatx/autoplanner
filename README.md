@@ -173,7 +173,7 @@ Resume loads `history.json` from the run's work directory, determines the last c
 
 With `-H` / `--human-review`, the reviewer is instructed to identify high-stakes architectural decisions — technology choices, data model designs, security boundaries — and emit them as structured decision records. When decisions are detected, the loop pauses and presents each decision to the human one at a time with options, trade-offs, and the document's current choice.
 
-The human picks an option (e.g., `B`) or types `skip` to accept the current choice. An optional note can follow the key (e.g., `B — but keep a TTL fallback for cold starts`). The choice is recorded as a **locked decision** — a binding constraint injected into all subsequent writer and reviewer prompts.
+The human picks an option (e.g., `B`) or types `skip` to accept the current choice. An optional note can follow the key (e.g., `B — but keep a TTL fallback for cold starts`). Anything else is treated as a question — the document author (Claude) will explain its reasoning and trade-offs before you commit. You can ask as many follow-up questions before picking an option. The choice is recorded as a **locked decision** — a binding constraint injected into all subsequent writer and reviewer prompts.
 
 If the reviewer later identifies a conflict with a locked decision, it can raise a conflict proposal. The human resolves conflicts the same way, choosing to supersede the original or keep it.
 

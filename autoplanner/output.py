@@ -10,6 +10,42 @@ import sys
 from typing import Protocol
 
 
+def _parse_decision_input(text: str, valid_keys: list[str]) -> tuple[str, str] | None:
+    """Parse slash-command decision input.
+
+    Returns:
+        ("A", note)    — choice via /A [-- note]
+        ("skip", "")   — skip via /skip
+        ("custom", note) — free-form answer via /custom <text>
+        ("options", "") — re-display options via /options
+        None           — bare text, treat as a question for the author
+    """
+    if not text.startswith("/"):
+        return None
+
+    body = text[1:]  # strip leading /
+    parts = body.split(None, 1)
+    if not parts:
+        return None
+    cmd = parts[0].upper()
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if cmd == "SKIP":
+        return ("skip", "")
+    if cmd == "OPTIONS":
+        return ("options", "")
+    if cmd == "CUSTOM":
+        return ("custom", rest)
+    if cmd in valid_keys:
+        # Optional note after separator
+        for sep in ("\u2014", "--", "-"):
+            if rest.startswith(sep):
+                return (cmd, rest[len(sep):].strip())
+        return (cmd, rest)
+
+    return None
+
+
 class Writer(Protocol):
     def write(self, text: str) -> None: ...
     def write_thinking(self, text: str) -> None: ...
@@ -78,6 +114,7 @@ class TerminalWriter:
                 c.print(f"[dim]{opt['description']}[/dim]")
             c.print(f"[green]Pros:[/green] [dim]{opt.get('pros', '')}[/dim]")
             c.print(f"[red]Cons:[/red] [dim]{opt.get('cons', '')}[/dim]")
+        c.print()
 
     def await_decision_input(self, valid_keys: list[str], prompt_text: str) -> tuple[str, str]:
         from rich.console import Console
@@ -90,23 +127,11 @@ class TerminalWriter:
             line = line.strip()
             if not line:
                 continue
-            # Parse: first token is key, rest after separator is note
-            parts = line.split(None, 1)
-            key = parts[0].upper()
-            note = ""
-            if len(parts) > 1:
-                # Strip leading separator if present
-                rest = parts[1]
-                for sep in ("\u2014", "--", "-"):
-                    if rest.startswith(sep):
-                        rest = rest[len(sep):].strip()
-                        break
-                note = rest
-            if key.lower() == "skip":
-                return ("skip", note)
-            if key in valid_keys:
-                return (key, note)
-            c.print(f"[red]Invalid choice '{key}'. Valid: {', '.join(valid_keys)}[/red]")
+            result = _parse_decision_input(line, valid_keys)
+            if result is not None:
+                return result
+            # Not a choice — treat as a question
+            return ("", line)
 
 
 # Singleton — set by the TUI or left as terminal default
