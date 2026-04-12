@@ -30,8 +30,8 @@ If two or more decisions are tightly coupled (choosing one constrains the other)
       "title": "Short title of the decision",
       "summary": "What is at stake and why this matters.",
       "options": [
-        {"key": "A", "label": "Option A label", "pros": "...", "cons": "..."},
-        {"key": "B", "label": "Option B label", "pros": "...", "cons": "..."}
+        {"key": "A", "label": "Option A label", "description": "2-3 sentences explaining this option in enough detail for a human to evaluate it without reading the full document.", "pros": "...", "cons": "..."},
+        {"key": "B", "label": "Option B label", "description": "2-3 sentences explaining this option.", "pros": "...", "cons": "..."}
       ],
       "current_choice": "A"
     }
@@ -42,7 +42,8 @@ If two or more decisions are tightly coupled (choosing one constrains the other)
 Field rules:
 - `id`: A short unique identifier (e.g., "d1", "d2"). Must not collide with any previously locked decision ID.
 - `current_choice`: Must match one of the option `key` values. This is the choice the document currently makes.
-- Each option must have `key`, `label`, `pros`, and `cons`.
+- Each option must have `key`, `label`, `description`, `pros`, and `cons`.
+- `description`: Provide enough context for the human reviewer to understand what this option entails — implementation approach, key trade-offs, and how it interacts with the rest of the design. Do not assume the reviewer has read the full document.
 
 ### Challenging a previously locked decision:
 
@@ -58,9 +59,9 @@ Do NOT reopen locked decisions unless you have identified a new conflict or inco
       "summary": "Explain the new conflict or incompatibility.",
       "conflict_with": "d1",
       "options": [
-        {"key": "A", "label": "Revert to alternative", "effect": "supersede", "pros": "...", "cons": "..."},
-        {"key": "B", "label": "Change constraint instead", "effect": "supersede", "pros": "...", "cons": "..."},
-        {"key": "C", "label": "Keep current choice", "effect": "keep_original", "pros": "...", "cons": "..."}
+        {"key": "A", "label": "Revert to alternative", "description": "...", "effect": "supersede", "pros": "...", "cons": "..."},
+        {"key": "B", "label": "Change constraint instead", "description": "...", "effect": "supersede", "pros": "...", "cons": "..."},
+        {"key": "C", "label": "Keep current choice", "description": "...", "effect": "keep_original", "pros": "...", "cons": "..."}
       ],
       "current_choice": "A"
     }

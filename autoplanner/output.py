@@ -16,6 +16,7 @@ class Writer(Protocol):
     def write_status(self, text: str) -> None: ...
     def thinking_start(self, label: str) -> None: ...
     def thinking_end(self) -> None: ...
+    def bell(self) -> None: ...
     def present_decision(self, decision: dict, prior_decisions: list[dict]) -> None: ...
     def await_decision_input(self, valid_keys: list[str], prompt_text: str) -> tuple[str, str]: ...
 
@@ -42,10 +43,11 @@ class TerminalWriter:
     def thinking_end(self) -> None:
         print("\033[0m", flush=True)
 
+    def bell(self) -> None:
+        print("\a", end="", flush=True)
+
     def present_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
         from rich.console import Console
-        from rich.panel import Panel
-        from rich.table import Table
         c = Console()
         c.print()
 
@@ -54,7 +56,7 @@ class TerminalWriter:
             c.print("[dim]Previously locked:[/dim]")
             for pd in prior_decisions:
                 if pd.get("resolution"):
-                    c.print(f"  [dim]{pd['id']} — {pd['resolution']['locked_direction']}[/dim]")
+                    c.print(f"[dim]{pd['id']} — {pd['resolution']['locked_direction']}[/dim]")
             c.print()
 
         # Decision header
@@ -62,32 +64,20 @@ class TerminalWriter:
         if decision.get("conflict_with"):
             conflict_note = f" [yellow](challenges {decision['conflict_with']})[/yellow]"
         c.print(f"[bold cyan]Decision: {decision['title']}[/bold cyan]{conflict_note}")
-        c.print(f"  {decision.get('summary', '')}")
+        c.print(decision.get("summary", ""))
         c.print()
 
-        # Options table
-        table = Table(show_header=True, header_style="bold")
-        table.add_column("Key", width=4)
-        table.add_column("Option")
-        table.add_column("Pros", style="green")
-        table.add_column("Cons", style="red")
-        if decision.get("conflict_with"):
-            table.add_column("Effect", style="yellow")
-
-        for opt in decision.get("options", []):
-            current = " ◀" if opt["key"] == decision.get("current_choice") else ""
-            row = [
-                f"[bold]{opt['key']}[/bold]",
-                f"{opt['label']}{current}",
-                opt.get("pros", ""),
-                opt.get("cons", ""),
-            ]
-            if decision.get("conflict_with"):
-                row.append(opt.get("effect", ""))
-            table.add_row(*row)
-
-        c.print(table)
-        c.print(f"  [dim]Current choice: {decision.get('current_choice')}[/dim]")
+        # Options
+        for i, opt in enumerate(decision.get("options", [])):
+            if i > 0:
+                c.print()
+            current = " [bright_blue]◀ current[/bright_blue]" if opt["key"] == decision.get("current_choice") else ""
+            effect_note = f" [yellow]\\[{opt['effect']}][/yellow]" if opt.get("effect") else ""
+            c.print(f"[bold]\\[{opt['key']}] {opt['label']}[/bold]{current}{effect_note}")
+            if opt.get("description"):
+                c.print(f"[dim]{opt['description']}[/dim]")
+            c.print(f"[green]Pros:[/green] [dim]{opt.get('pros', '')}[/dim]")
+            c.print(f"[red]Cons:[/red] [dim]{opt.get('cons', '')}[/dim]")
 
     def await_decision_input(self, valid_keys: list[str], prompt_text: str) -> tuple[str, str]:
         from rich.console import Console

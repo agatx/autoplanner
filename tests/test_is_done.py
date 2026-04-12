@@ -12,6 +12,7 @@ class _NullWriter:
     def write_status(self, text: str) -> None: pass
     def thinking_start(self, label: str) -> None: pass
     def thinking_end(self) -> None: pass
+    def bell(self) -> None: pass
     def present_decision(self, decision: dict, prior_decisions: list[dict]) -> None: pass
     def await_decision_input(self, valid_keys: list[str], prompt_text: str) -> tuple[str, str]:
         return ("A", "")

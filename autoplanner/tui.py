@@ -84,6 +84,9 @@ class TuiWriter(Writer):
         self.flush_pending()
         self._app.call_from_thread(self._app.end_thinking)
 
+    def bell(self) -> None:
+        self._app.call_from_thread(self._app.bell)
+
     def present_decision(self, decision: dict, prior_decisions: list[dict]) -> None:
         self.flush_pending()
         self._app.call_from_thread(self._app.render_decision, decision, prior_decisions)
@@ -244,22 +247,35 @@ class AutoplannerApp(App):
             for pd in prior_decisions:
                 if pd.get("resolution"):
                     log.write(Text(
-                        f"  {pd['id']} — {pd['resolution']['locked_direction']}",
+                        f"{pd['id']} — {pd['resolution']['locked_direction']}",
                         style="dim",
                     ))
             log.write(Text(""))
 
         conflict_note = f" (challenges {decision['conflict_with']})" if decision.get("conflict_with") else ""
         log.write(Text(f"Decision: {decision['title']}{conflict_note}", style="bold cyan"))
-        log.write(Text(f"  {decision.get('summary', '')}"))
+        log.write(Text(decision.get("summary", "")))
         log.write(Text(""))
 
-        for opt in decision.get("options", []):
-            current = " ◀" if opt["key"] == decision.get("current_choice") else ""
-            effect_note = f" [{opt['effect']}]" if opt.get("effect") else ""
-            log.write(Text(f"  [{opt['key']}] {opt['label']}{current}{effect_note}", style="bold"))
-            log.write(Text(f"      Pros: {opt.get('pros', '')}", style="green"))
-            log.write(Text(f"      Cons: {opt.get('cons', '')}", style="red"))
+        for i, opt in enumerate(decision.get("options", [])):
+            if i > 0:
+                log.write(Text(""))
+            current_mark = Text(" \u25c0 current", style="bright_blue") if opt["key"] == decision.get("current_choice") else Text("")
+            effect_note = Text(f" [{opt['effect']}]", style="yellow") if opt.get("effect") else Text("")
+            header = Text(f"[{opt['key']}] {opt['label']}", style="bold")
+            header.append_text(current_mark)
+            header.append_text(effect_note)
+            log.write(header)
+            if opt.get("description"):
+                log.write(Text(opt["description"], style="dim"))
+            pros_line = Text()
+            pros_line.append("Pros: ", style="green")
+            pros_line.append(opt.get("pros", ""), style="dim")
+            log.write(pros_line)
+            cons_line = Text()
+            cons_line.append("Cons: ", style="red")
+            cons_line.append(opt.get("cons", ""), style="dim")
+            log.write(cons_line)
 
     def begin_decision_input(
         self, valid_keys: list[str], prompt_text: str, event: threading.Event,

@@ -153,6 +153,7 @@ def _resolve_decisions(
     iteration: int,
 ) -> bool:
     """Present and resolve proposed decisions.  Returns True if any were resolved."""
+    w.bell()
     resolved_any = False
     for d in decisions:
         if not history.propose_decision(d):
