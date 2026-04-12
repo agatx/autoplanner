@@ -67,7 +67,7 @@ def discuss(
     """Answer a user question about a decision during HITL review."""
     if first_ask:
         options_text = "\n".join(
-            f"- [{o['key']}] {o['label']}: {o['description']}"
+            f"- [{o.get('key', '')}] {o.get('label', '')}: {o.get('description', '')}"
             for o in decision["options"]
         )
         prompt = load("discuss_decision.txt").format(

@@ -75,6 +75,10 @@ def _validate_decision(d: dict, existing: dict[str, dict]) -> str | None:
     if not isinstance(options, list) or len(options) == 0:
         return "options must be a non-empty array"
 
+    for o in options:
+        if not isinstance(o, dict):
+            return "each option must be an object"
+
     option_keys = {o.get("key") for o in options}
     if d["current_choice"] not in option_keys:
         return f"current_choice {d['current_choice']!r} not in option keys {option_keys}"
@@ -106,7 +110,7 @@ def _validate_decision(d: dict, existing: dict[str, dict]) -> str | None:
         if ex["state"] in ("active", "proposed") and not conflict_with:
             # Dedup candidate — handled by propose_decision(), not a parse error
             pass
-        elif ex["state"] == "superseded":
-            return f"ID {did!r} collides with superseded entry"
+        else:
+            return f"ID {did!r} collides with existing {ex['state']} entry"
 
     return None

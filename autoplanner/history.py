@@ -85,19 +85,19 @@ class History:
         did = decision["id"]
         existing = self.decisions.get(did)
 
+        conflict_ref = decision.get("conflict_with")
+
         if existing is not None:
-            # Dedup: same ID, already proposed/active, no conflict_with on incoming
-            if existing["state"] in ("proposed", "active") and not decision.get("conflict_with"):
+            # Dedup/idempotent replay is only allowed for non-conflict proposals.
+            if not conflict_ref and existing["state"] in ("proposed", "active"):
                 return False
-            # Already proposed (idempotent replay)
-            if existing["state"] == "proposed":
-                return False
-            # Collision with superseded entry is invalid
-            if existing["state"] == "superseded":
-                raise ValueError(f"Decision ID {did} collides with superseded entry")
+
+            # Any other ID reuse is invalid because it would overwrite existing state.
+            raise ValueError(
+                f"Decision ID {did} already exists with state {existing['state']}"
+            )
 
         # Handle conflict: transition referenced decision active -> challenged
-        conflict_ref = decision.get("conflict_with")
         if conflict_ref:
             target = self.decisions.get(conflict_ref)
             if target is None or target["state"] not in ("active", "challenged"):

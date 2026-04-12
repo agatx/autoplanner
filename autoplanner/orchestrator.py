@@ -169,13 +169,14 @@ def _resolve_decisions(
     w,
     iteration: int,
     writer_session: ClaudeSession | None = None,
+    already_proposed: bool = False,
 ) -> bool:
     """Present and resolve proposed decisions.  Returns True if any were resolved."""
     w.bell()
     resolved_any = False
     discussed: set[str] = set()
     for d in decisions:
-        if not history.propose_decision(d):
+        if not already_proposed and not history.propose_decision(d):
             w.write_status(f"  Decision skipped (duplicate of active {d['id']})")
             continue
 
@@ -190,6 +191,7 @@ def _resolve_decisions(
         if on_decision_policy == "accept":
             chosen_key = d["current_choice"]
             note = ""
+            resolution = _build_resolution(chosen_key, note, d)
             w.write_status(f"  [yellow]Decision auto-accepted: {d['id']} \u2014 {chosen_key}[/yellow]")
         else:  # "prompt"
             valid_keys = [opt["key"] for opt in d["options"]]
@@ -471,8 +473,10 @@ def _run_loop(
     if human_review and history.has_proposed():
         pending = history.pending_decisions()
         w.write_status(f"  Resuming with {len(pending)} pending decision(s) from prior run")
-        _resolve_decisions(pending, history, on_decision_policy, w, start_iteration,
-                           writer_session=None)
+        _resolve_decisions(
+            pending, history, on_decision_policy, w, start_iteration,
+            writer_session=None, already_proposed=True,
+        )
 
     # Decision-pass tracking
     decision_passes_used = 0
