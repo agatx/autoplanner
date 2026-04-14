@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from queue import Empty
 from pathlib import Path
 
@@ -331,10 +332,11 @@ class AutoplannerApp(App):
                 self._writer.flush_pending()
             self.call_from_thread(self._handle_run_complete, result)
         except Exception as e:
-            debug(f"worker: exception: {e}")
+            tb = traceback.format_exception(e)
+            debug(f"worker: exception:\n{''.join(tb)}")
             if self._writer is not None:
                 self._writer.flush_pending()
-            self.call_from_thread(self._handle_run_failed, str(e))
+            self.call_from_thread(self._handle_run_failed, str(e), "".join(tb))
 
     def _safe_write(self, renderable, **kwargs) -> None:
         """Write to the log, catching any Rich rendering errors."""
@@ -444,7 +446,13 @@ class AutoplannerApp(App):
             bell=True,
         )
 
-    def _handle_run_failed(self, error: str) -> None:
+    def _handle_run_failed(self, error: str, tb: str = "") -> None:
+        if tb:
+            log = self.query_one("#log", RichLog)
+            self._safe_write("")
+            self._safe_write(Text("Traceback:", style="red"))
+            for line in tb.strip().splitlines():
+                self._safe_write(Text(line, style="dim red"))
         self._handle_run_end(
             "Error — press Ctrl+C to exit",
             Text(f"✗ Error: {error}", style="bold red"),

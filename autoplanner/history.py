@@ -40,6 +40,7 @@ class History:
     def __post_init__(self) -> None:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._acquire_lock()
+        self.save_json()
 
     def _acquire_lock(self) -> None:
         lock_path = self.work_dir / "lock"
@@ -65,6 +66,7 @@ class History:
         filename = f"{record.iteration:02d}_{record.phase}.md"
         path = self.work_dir / filename
         path.write_text(record.content, encoding="utf-8")
+        self.save_json()
         return path
 
     def last_document_and_review(self) -> tuple[str, str]:
