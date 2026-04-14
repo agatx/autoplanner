@@ -142,6 +142,7 @@ class AutoplannerApp(App):
         human_review: bool = False,
         on_decision_policy: str = "prompt",
         on_parse_error_policy: str = "warn",
+        skip_permissions: bool = False,
     ) -> None:
         super().__init__()
         self._initial_task = task
@@ -157,6 +158,7 @@ class AutoplannerApp(App):
         self._human_review = human_review
         self._on_decision_policy = on_decision_policy
         self._on_parse_error_policy = on_parse_error_policy
+        self._skip_permissions = skip_permissions
         self._steering = QueueSteering()
         self._running = False
         self._in_thinking = False
@@ -326,6 +328,7 @@ class AutoplannerApp(App):
                 human_review=self._human_review,
                 on_decision_policy=self._on_decision_policy,
                 on_parse_error_policy=self._on_parse_error_policy,
+                skip_permissions=self._skip_permissions,
                 **extra_kwargs,
             )
             if self._writer is not None:

@@ -27,12 +27,13 @@ def _close_sessions(sessions: list) -> None:
 
 def _make_sessions(
     claude_model: str, claude_effort: str, codex_model: str, codex_effort: str,
+    *, skip_permissions: bool = False,
 ) -> tuple[ClaudeSession, ClaudeSession, CodexSession, ClaudeSession]:
     return (
-        ClaudeSession(model=claude_model, effort=claude_effort, label="claude"),
-        ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review"),
-        CodexSession(model=codex_model, effort=codex_effort, label="codex"),
-        ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough"),
+        ClaudeSession(model=claude_model, effort=claude_effort, label="claude", skip_permissions=skip_permissions),
+        ClaudeSession(model=claude_model, effort=claude_effort, label="claude-review", skip_permissions=skip_permissions),
+        CodexSession(model=codex_model, effort=codex_effort, label="codex", full_auto=skip_permissions),
+        ClaudeSession(model=claude_model, effort=claude_effort, label="claude-walkthrough", skip_permissions=skip_permissions),
     )
 
 
@@ -266,6 +267,7 @@ def run(
     human_review: bool = False,
     on_decision_policy: str = "prompt",
     on_parse_error_policy: str = "warn",
+    skip_permissions: bool = False,
 ) -> Path:
     cwd = Path.cwd()
 
@@ -284,7 +286,8 @@ def run(
     history = History(task=task, run_id=run_id, work_dir=work_dir)
 
     writer_session, claude_review_session, codex_session, walkthrough_session = \
-        _make_sessions(claude_model, claude_effort, codex_model, codex_effort)
+        _make_sessions(claude_model, claude_effort, codex_model, codex_effort,
+                       skip_permissions=skip_permissions)
 
     if steering_source is None:
         steering_source = StdinSteering()
@@ -331,6 +334,7 @@ def resume(
     human_review: bool = False,
     on_decision_policy: str = "prompt",
     on_parse_error_policy: str = "warn",
+    skip_permissions: bool = False,
 ) -> Path:
     """Resume a previous run from where it left off."""
     cwd = Path.cwd()
@@ -369,7 +373,8 @@ def resume(
     )
 
     writer_session, claude_review_session, codex_session, walkthrough_session = \
-        _make_sessions(claude_model, claude_effort, codex_model, codex_effort)
+        _make_sessions(claude_model, claude_effort, codex_model, codex_effort,
+                       skip_permissions=skip_permissions)
 
     if steering_source is None:
         steering_source = StdinSteering()

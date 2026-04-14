@@ -77,6 +77,7 @@ class ClaudeSession:
     model: str = "opus"
     effort: str = "high"
     label: str = "claude"
+    skip_permissions: bool = False
     _proc: subprocess.Popen | None = field(default=None, repr=False)
     _session_id: str | None = field(default=None, repr=False)
     _fd: int | None = field(default=None, repr=False)
@@ -87,16 +88,19 @@ class ClaudeSession:
             return
         if self._proc is not None:
             self.close()
+        cmd = [
+            "claude", "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--model", self.model,
+            "--effort", self.effort,
+        ]
+        if self.skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
         self._proc = subprocess.Popen(
-            [
-                "claude", "-p",
-                "--input-format", "stream-json",
-                "--output-format", "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-                "--model", self.model,
-                "--effort", self.effort,
-            ],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -285,6 +289,7 @@ class CodexSession:
     model: str = ""
     effort: str = ""
     label: str = "codex"
+    full_auto: bool = False
     _session_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -314,6 +319,9 @@ class CodexSession:
             cmd += ["-c", f"model={self.model}"]
         if self.effort:
             cmd += ["-c", f"model_reasoning_effort={self.effort}"]
+
+        if self.full_auto:
+            cmd.append("--full-auto")
 
         if self._session_id:
             cmd += [self._session_id, "-"]

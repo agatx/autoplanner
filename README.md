@@ -77,6 +77,7 @@ Type `q`, `quit`, or Ctrl+C to exit. After a run completes, you can start a new 
 | `-H` / `--human-review` | off | Enable human-in-the-loop review of high-stakes architectural decisions |
 | `--on-decision` | auto | Decision resolution policy: `prompt` (interactive), `accept` (auto-accept), `fail` (abort). Default: `prompt` if TTY, `fail` otherwise |
 | `--on-parse-error` | auto | Parse error policy: `warn` (continue) or `fail` (abort). Default: `warn` if TTY, `fail` otherwise |
+| `--dangerously-skip-permissions` | off | Pass `--dangerously-skip-permissions` to Claude and `--full-auto` to Codex, allowing agents to access files outside the current directory without prompting |
 | `--debug` | off | Enable diagnostic logging to `autoplanner-debug.log` |
 
 ### Examples
@@ -108,6 +109,9 @@ autoplanner -H "Design a caching layer"
 
 # Auto-accept decisions in CI (no human prompt)
 autoplanner --headless -H --on-decision accept "Design a caching layer"
+
+# Skip permission prompts (agents can read files outside cwd)
+autoplanner --dangerously-skip-permissions "Design a caching layer"
 ```
 
 ## Output

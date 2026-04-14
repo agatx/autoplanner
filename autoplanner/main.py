@@ -47,6 +47,10 @@ def run(
         "--on-parse-error",
         help="Parse error policy: warn or fail (default: auto-detect from TTY)",
     )] = None,
+    skip_permissions: Annotated[bool, typer.Option(
+        "--dangerously-skip-permissions",
+        help="Pass --dangerously-skip-permissions to Claude and --full-auto to Codex",
+    )] = False,
     enable_debug: Annotated[bool, typer.Option(
         "--debug",
         help="Enable diagnostic logging to stderr",
@@ -84,6 +88,7 @@ def run(
                 codex_model=codex_model,
                 codex_effort=codex_effort,
                 reviewer=reviewer,
+                skip_permissions=skip_permissions,
                 **hitl_kwargs,
             )
         else:
@@ -97,6 +102,7 @@ def run(
                 codex_effort=codex_effort,
                 reviewer=reviewer,
                 continue_run=continue_run,
+                skip_permissions=skip_permissions,
                 **hitl_kwargs,
             )
             tui.run()
@@ -116,6 +122,7 @@ def run(
             reviewer=reviewer,
             skip_to_walkthrough=skip_to_walkthrough,
             ingest=ingest,
+            skip_permissions=skip_permissions,
             **hitl_kwargs,
         )
     else:
@@ -132,6 +139,7 @@ def run(
             reviewer=reviewer,
             skip_to_walkthrough=skip_to_walkthrough,
             ingest=ingest,
+            skip_permissions=skip_permissions,
             **hitl_kwargs,
         )
         tui.run()
