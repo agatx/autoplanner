@@ -252,10 +252,11 @@ class ClaudeSession:
         from autoplanner.debug import debug
         if self._proc is not None:
             pid = self._proc.pid
-            try:
-                self._proc.stdin.close()
-            except Exception:
-                pass
+            if self._proc.stdin:
+                try:
+                    self._proc.stdin.close()
+                except Exception:
+                    pass
             _kill_pgroup(pid)
             try:
                 self._proc.wait(timeout=5)

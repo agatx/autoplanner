@@ -99,6 +99,7 @@ class TuiWriter(Writer):
             self._app.begin_decision_input, valid_keys, prompt_text, event,
         )
         event.wait()
+        assert self._app._decision_result is not None
         return self._app._decision_result
 
 
@@ -185,20 +186,20 @@ class AutoplannerApp(App):
         elif self._initial_task:
             self._start_run(self._initial_task)
 
-    def action_quit(self) -> None:
+    async def action_quit(self) -> None:
         heartbeat_stop()
         from autoplanner.agents.session import _cleanup_all
         _cleanup_all()
         self.exit()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
         event.input.value = ""
 
         if text.lower() in ("q", "quit", "exit") and not self._running:
-            self.action_quit()
+            await self.action_quit()
             return
 
         log = self.query_one("#log", RichLog)
@@ -216,6 +217,8 @@ class AutoplannerApp(App):
 
     def _handle_decision_input(self, text: str, log: RichLog) -> None:
         """Validate and accept decision input, or treat as a question."""
+        assert self._decision_valid_keys is not None
+        assert self._decision_event is not None
         result = _parse_decision_input(text, self._decision_valid_keys)
 
         log.write(Text(f"> {text}", style="cyan"))
@@ -451,7 +454,6 @@ class AutoplannerApp(App):
 
     def _handle_run_failed(self, error: str, tb: str = "") -> None:
         if tb:
-            log = self.query_one("#log", RichLog)
             self._safe_write("")
             self._safe_write(Text("Traceback:", style="red"))
             for line in tb.strip().splitlines():

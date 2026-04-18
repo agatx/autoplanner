@@ -4,6 +4,7 @@ import json
 import threading
 from enum import Enum
 from pathlib import Path
+from typing import Literal, cast
 
 from autoplanner.agents import claude_agent, codex_agent
 from autoplanner.agents.session import ClaudeSession, CodexSession
@@ -516,7 +517,7 @@ def _run_loop(
         # --- Draft or Revise ---
         if resume_skip_write and iteration == start_iteration:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Resuming from prior draft...")
-            document = initial_document
+            document = initial_document or ""
             skip_history_save = True
         elif iteration == 1 and initial_document is not None:
             w.write_status(f"\n[bold cyan]Iteration {iteration}:[/bold cyan] Using ingested document...")
@@ -558,7 +559,7 @@ def _run_loop(
         if not skip_history_save:
             path = history.add(IterationRecord(
                 iteration=iteration,
-                phase=phase,
+                phase=cast(Literal["draft", "review", "revision", "decision"], phase),
                 author="claude",
                 content=document,
             ))
@@ -621,7 +622,7 @@ def _run_loop(
         history.add(IterationRecord(
             iteration=iteration,
             phase="review",
-            author=review_author,
+            author=cast(Literal["claude", "codex", "human"], review_author),
             content=review_text,
         ))
         w.write_status(f"  Review received from {review_author} ({len(review_text)} chars)")

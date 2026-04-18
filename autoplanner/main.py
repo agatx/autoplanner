@@ -71,12 +71,7 @@ def run(
     if on_parse_error not in ("warn", "fail"):
         raise typer.BadParameter(f"Invalid --on-parse-error: {on_parse_error}")
 
-    hitl_kwargs = dict(
-        human_review=human_review,
-        on_decision_policy=on_decision,
-        on_parse_error_policy=on_parse_error,
-    )
-
+    # We expand these individually to avoid mypy **kwargs dict[str, object] errors
     if continue_run is not None:
         if headless:
             from autoplanner import orchestrator
@@ -89,7 +84,9 @@ def run(
                 codex_effort=codex_effort,
                 reviewer=reviewer,
                 skip_permissions=skip_permissions,
-                **hitl_kwargs,
+                human_review=human_review,
+                on_decision_policy=on_decision,
+                on_parse_error_policy=on_parse_error,
             )
         else:
             from autoplanner.tui import AutoplannerApp
@@ -103,7 +100,9 @@ def run(
                 reviewer=reviewer,
                 continue_run=continue_run,
                 skip_permissions=skip_permissions,
-                **hitl_kwargs,
+                human_review=human_review,
+                on_decision_policy=on_decision,
+                on_parse_error_policy=on_parse_error,
             )
             tui.run()
         return
@@ -123,7 +122,9 @@ def run(
             skip_to_walkthrough=skip_to_walkthrough,
             ingest=ingest,
             skip_permissions=skip_permissions,
-            **hitl_kwargs,
+            human_review=human_review,
+            on_decision_policy=on_decision,
+            on_parse_error_policy=on_parse_error,
         )
     else:
         if not task and skip_to_walkthrough:
@@ -140,7 +141,9 @@ def run(
             skip_to_walkthrough=skip_to_walkthrough,
             ingest=ingest,
             skip_permissions=skip_permissions,
-            **hitl_kwargs,
+            human_review=human_review,
+            on_decision_policy=on_decision,
+            on_parse_error_policy=on_parse_error,
         )
         tui.run()
 
