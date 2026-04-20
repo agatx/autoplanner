@@ -35,6 +35,7 @@ class History:
     work_dir: Path
     records: list[IterationRecord] = field(default_factory=list)
     decisions: dict[str, dict] = field(default_factory=dict)
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     _lock_fd: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -184,6 +185,9 @@ class History:
         h.work_dir = work_dir
         h.records = [IterationRecord(**r) for r in data["records"]]
         h.decisions = data.get("decisions", {})
+        h.started_at = data.get("started_at") or (
+            h.records[0].timestamp if h.records else datetime.now(timezone.utc).isoformat()
+        )
         h._lock_fd = None
         if lock:
             h._acquire_lock()
@@ -193,12 +197,106 @@ class History:
         data = {
             "task": self.task,
             "run_id": self.run_id,
+            "started_at": self.started_at,
             "records": [asdict(r) for r in self.records],
             "decisions": self.decisions,
         }
         json_path = self.work_dir / "history.json"
         json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return json_path
+
+
+def _parse_ts(iso: str) -> datetime:
+    return datetime.fromisoformat(iso)
+
+
+def compute_stats(
+    history: "History",
+    *,
+    document: str = "",
+    walkthrough_seconds: float = 0.0,
+) -> dict:
+    """Summarize a run: iteration count, wall time, per-author time, decisions."""
+    started = _parse_ts(history.started_at)
+    by_author: dict[str, float] = {}
+    phase_counts: dict[str, int] = {}
+    prev_ts = started
+    for rec in history.records:
+        rec_ts = _parse_ts(rec.timestamp)
+        elapsed = max(0.0, (rec_ts - prev_ts).total_seconds())
+        by_author[rec.author] = by_author.get(rec.author, 0.0) + elapsed
+        phase_counts[rec.phase] = phase_counts.get(rec.phase, 0) + 1
+        prev_ts = rec_ts
+
+    if history.records:
+        wall = (_parse_ts(history.records[-1].timestamp) - started).total_seconds()
+    else:
+        wall = (datetime.now(timezone.utc) - started).total_seconds()
+    wall += walkthrough_seconds
+
+    iterations = max((r.iteration for r in history.records), default=0)
+
+    decision_states: dict[str, int] = {}
+    for d in history.decisions.values():
+        decision_states[d["state"]] = decision_states.get(d["state"], 0) + 1
+
+    doc_words = len(document.split()) if document else 0
+    doc_lines = document.count("\n") + 1 if document else 0
+
+    return {
+        "iterations": iterations,
+        "wall_seconds": wall,
+        "walkthrough_seconds": walkthrough_seconds,
+        "by_author": by_author,
+        "phase_counts": phase_counts,
+        "decision_states": decision_states,
+        "doc_words": doc_words,
+        "doc_lines": doc_lines,
+    }
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m{secs:02d}s"
+
+
+def format_stats(stats: dict) -> list[str]:
+    """Render stats as a list of lines suitable for writer.write_status."""
+    lines: list[str] = []
+    lines.append("[bold]Session stats[/bold]")
+    lines.append(
+        f"  Iterations: {stats['iterations']}  "
+        f"(drafts: {stats['phase_counts'].get('draft', 0)}, "
+        f"reviews: {stats['phase_counts'].get('review', 0)}, "
+        f"revisions: {stats['phase_counts'].get('revision', 0)}, "
+        f"decisions: {stats['phase_counts'].get('decision', 0)})"
+    )
+    lines.append(f"  Wall time: {_fmt_duration(stats['wall_seconds'])}")
+    if stats["walkthrough_seconds"]:
+        lines.append(f"    Walkthrough: {_fmt_duration(stats['walkthrough_seconds'])}")
+
+    if stats["by_author"]:
+        lines.append("  Time by contributor:")
+        for author, secs in sorted(stats["by_author"].items(), key=lambda kv: -kv[1]):
+            lines.append(f"    {author}: {_fmt_duration(secs)}")
+
+    if stats["decision_states"]:
+        breakdown = ", ".join(
+            f"{state}: {count}" for state, count in sorted(stats["decision_states"].items())
+        )
+        lines.append(f"  Decisions: {breakdown}")
+
+    if stats["doc_words"]:
+        lines.append(
+            f"  Final document: {stats['doc_words']} words, {stats['doc_lines']} lines"
+        )
+    return lines
 
 
 def make_run_id(task: str) -> str:

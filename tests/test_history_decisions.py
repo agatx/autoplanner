@@ -7,6 +7,7 @@ from autoplanner.history import History, IterationRecord
 
 def _make_history(tmp_path):
     """Create a minimal History bypassing __post_init__ (no file lock)."""
+    from datetime import datetime, timezone
     work_dir = tmp_path / "test-run"
     work_dir.mkdir()
     h = object.__new__(History)
@@ -16,6 +17,7 @@ def _make_history(tmp_path):
     h._lock_fd = None
     h.records = []
     h.decisions = {}
+    h.started_at = datetime.now(timezone.utc).isoformat()
     return h
 
 

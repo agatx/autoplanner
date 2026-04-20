@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Literal, cast
@@ -9,7 +10,10 @@ from typing import Literal, cast
 from autoplanner.agents import claude_agent, codex_agent
 from autoplanner.agents.session import ClaudeSession, CodexSession
 from autoplanner.decisions import extract_decisions, strip_decisions_trailer
-from autoplanner.history import History, IterationRecord, make_run_id, make_output_name, find_run_dir
+from autoplanner.history import (
+    History, IterationRecord, compute_stats, format_stats,
+    make_run_id, make_output_name, find_run_dir,
+)
 from autoplanner.output import get_writer
 from autoplanner.prompts import load
 from autoplanner.steering import SteeringSource, StdinSteering
@@ -431,7 +435,15 @@ def _run_walkthrough_only(
 
     try:
         w.write_status("\n[bold]Generating walkthrough...[/bold]")
+        walk_start = time.monotonic()
         walkthrough = _generate_walkthrough(task, history, walkthrough_session)
+        walk_elapsed = time.monotonic() - walk_start
+
+        stats = compute_stats(history, document=document, walkthrough_seconds=walk_elapsed)
+        w.write_status("")
+        for line in format_stats(stats):
+            w.write_status(line)
+
         return _write_outputs(task, cwd, history.work_dir, document, walkthrough)
     finally:
         threading.Thread(
@@ -641,7 +653,15 @@ def _run_loop(
     history.save_json()
 
     w.write_status("\n[bold]Generating walkthrough...[/bold]")
+    walk_start = time.monotonic()
     walkthrough = _generate_walkthrough(task, history, walkthrough_session)
+    walk_elapsed = time.monotonic() - walk_start
+
+    stats = compute_stats(history, document=document, walkthrough_seconds=walk_elapsed)
+    w.write_status("")
+    for line in format_stats(stats):
+        w.write_status(line)
+
     return _write_outputs(task, cwd, history.work_dir, document, walkthrough)
 
 

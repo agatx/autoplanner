@@ -136,6 +136,10 @@ Intermediate iterations are saved in `.autoplanner/<run-id>/`:
 
 A file lock prevents concurrent runs from writing to the same work directory.
 
+### Session stats
+
+At the end of a run, a summary is printed: iteration count, wall time (including walkthrough), time attributed to each contributor (claude / codex / human), decision counts by state, and final document size.
+
 ## Steering
 
 Type instructions while agents are working to steer the process:

@@ -10,6 +10,8 @@ from autoplanner.history import (
     find_run_dir,
     History,
     IterationRecord,
+    compute_stats,
+    format_stats,
     make_run_id,
     make_output_name,
 )
@@ -171,6 +173,7 @@ class TestLastDocumentAndReview:
 
 class TestHistoryJson:
     def test_save_and_load_roundtrip(self, tmp_path):
+        from datetime import datetime, timezone
         work_dir = tmp_path / "test-run"
         work_dir.mkdir()
         # Create history without locking (bypass __post_init__)
@@ -180,6 +183,7 @@ class TestHistoryJson:
         h.work_dir = work_dir
         h._lock_fd = None
         h.decisions = {}
+        h.started_at = datetime.now(timezone.utc).isoformat()
         h.records = [
             IterationRecord(iteration=1, phase="draft", author="claude", content="Draft v1"),
             IterationRecord(iteration=1, phase="review", author="codex", content="Needs work"),
@@ -197,6 +201,7 @@ class TestHistoryJson:
         assert loaded.records[1].author == "codex"
         assert loaded.records[2].phase == "revision"
         assert loaded.decisions == {}
+        assert loaded.started_at == h.started_at
 
 
 # ---------------------------------------------------------------------------
@@ -220,3 +225,73 @@ class TestBuildIterationHistory:
         h = object.__new__(History)
         h.records = []
         assert h.build_iteration_history() == ""
+
+
+# ---------------------------------------------------------------------------
+# compute_stats / format_stats
+# ---------------------------------------------------------------------------
+
+class TestComputeStats:
+    def _history_with_timeline(self, started_iso, timeline):
+        """timeline is a list of (offset_seconds, phase, author, iteration)."""
+        from datetime import datetime, timedelta, timezone
+        base = datetime.fromisoformat(started_iso)
+        h = object.__new__(History)
+        h.started_at = started_iso
+        h.decisions = {}
+        h.records = [
+            IterationRecord(
+                iteration=iteration, phase=phase, author=author, content="",
+                timestamp=(base + timedelta(seconds=off)).isoformat(),
+            )
+            for off, phase, author, iteration in timeline
+        ]
+        return h
+
+    def test_per_author_attribution_and_totals(self):
+        h = self._history_with_timeline(
+            "2026-01-01T12:00:00+00:00",
+            [
+                (30, "draft", "claude", 1),
+                (75, "review", "codex", 1),
+                (130, "revision", "claude", 2),
+                (145, "decision", "human", 2),
+            ],
+        )
+        stats = compute_stats(h, document="a b c", walkthrough_seconds=10.0)
+
+        assert stats["iterations"] == 2
+        assert stats["phase_counts"] == {"draft": 1, "review": 1, "revision": 1, "decision": 1}
+        # 145s loop + 10s walkthrough
+        assert stats["wall_seconds"] == pytest.approx(155.0, abs=0.001)
+        assert stats["walkthrough_seconds"] == 10.0
+        assert stats["by_author"]["claude"] == pytest.approx(30 + (130 - 75))
+        assert stats["by_author"]["codex"] == pytest.approx(75 - 30)
+        assert stats["by_author"]["human"] == pytest.approx(145 - 130)
+
+    def test_empty_history_uses_now(self):
+        from datetime import datetime, timezone, timedelta
+        started = datetime.now(timezone.utc) - timedelta(seconds=5)
+        h = object.__new__(History)
+        h.started_at = started.isoformat()
+        h.records = []
+        h.decisions = {}
+        stats = compute_stats(h)
+        assert stats["iterations"] == 0
+        assert stats["by_author"] == {}
+        assert stats["wall_seconds"] >= 5
+
+    def test_format_stats_includes_key_sections(self):
+        h = self._history_with_timeline(
+            "2026-01-01T12:00:00+00:00",
+            [(30, "draft", "claude", 1), (75, "review", "codex", 1)],
+        )
+        h.decisions = {"d1": {"id": "d1", "state": "active"}}
+        lines = format_stats(compute_stats(h, document="hello world"))
+        joined = "\n".join(lines)
+        assert "Session stats" in joined
+        assert "Iterations: 1" in joined
+        assert "claude:" in joined
+        assert "codex:" in joined
+        assert "active: 1" in joined
+        assert "Final document: 2 words" in joined
