@@ -5,6 +5,9 @@ Review the feedback carefully, evaluate its merit and only then revise the docum
 Focus on the highest-severity issues first. If the reviewer's suggestion conflicts with prior decisions, explain your reasoning in the document.
 If this is a late iteration, prioritize converging — make targeted fixes rather than restructuring.
 
+Remember that you are responsible for the quality of the document, and you have the most context about the task.
+When review contradicts your reasoning, don't take it at face value - investigate, think hard, and feel free to push back in the document explaining why you think your reasoning is better.
+
 Output ONLY the revised markdown document — no preamble, no commentary, no wrapping code fences. Start directly with the top-level heading.
 
 ## Current Document
