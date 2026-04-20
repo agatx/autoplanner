@@ -161,7 +161,9 @@ class AutoplannerApp(App):
         self._on_parse_error_policy = on_parse_error_policy
         self._skip_permissions = skip_permissions
         self._steering = QueueSteering()
-        self._running = False
+        self._orchestrator_running = False
+        self._worker = None
+        self._last_run_id: str | None = None
         self._in_thinking = False
         self._streaming_buf = ""
         self._writer: TuiWriter | None = None
@@ -170,6 +172,13 @@ class AutoplannerApp(App):
         self._decision_result: tuple[str, str] | None = None
         self._decision_valid_keys: list[str] | None = None
 
+    def _worker_alive(self) -> bool:
+        if self._worker is None:
+            return False
+        state = getattr(self._worker, "state", None)
+        name = getattr(state, "name", str(state))
+        return name in ("PENDING", "RUNNING")
+
     def compose(self) -> ComposeResult:
         yield OutputLog(id="log", wrap=True, highlight=True, markup=True)
         placeholder = "Enter task description..." if not self._initial_task else "Type steering instructions (Enter to send)..."
@@ -177,10 +186,19 @@ class AutoplannerApp(App):
         yield Input(placeholder=placeholder, id="prompt-input")
 
     def on_mount(self) -> None:
+        debug(f"on_mount: running={self._orchestrator_running} task={self._initial_task!r} ingest={self._ingest!r} continue={self._continue_run!r}")
         self._writer = TuiWriter(self)
         set_writer(self._writer)
         heartbeat_start(self)
         self.set_focus(self.query_one("#prompt-input", Input), scroll_visible=False)
+        if self._ingest and not self._initial_task and self._continue_run is None:
+            log = self.query_one("#log", RichLog)
+            log.write(Text(f"Ingested document: {self._ingest}", style="bold green"))
+            log.write(Text(
+                "Enter a task description below to start refining it "
+                "(e.g. \"Improve this plan\").",
+                style="dim",
+            ))
         if self._continue_run is not None:
             self._start_resume(self._continue_run)
         elif self._initial_task:
@@ -194,11 +212,16 @@ class AutoplannerApp(App):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
+        worker_state = getattr(getattr(self._worker, "state", None), "name", None)
+        debug(
+            f"on_input_submitted: text={text!r} running={self._orchestrator_running} "
+            f"decision_phase={self._in_decision_phase} worker_state={worker_state}"
+        )
         if not text:
             return
         event.input.value = ""
 
-        if text.lower() in ("q", "quit", "exit") and not self._running:
+        if text.lower() in ("q", "quit", "exit") and not self._orchestrator_running:
             await self.action_quit()
             return
 
@@ -208,7 +231,15 @@ class AutoplannerApp(App):
             self._handle_decision_input(text, log)
             return
 
-        if not self._running:
+        if self._orchestrator_running and not self._worker_alive():
+            debug(f"on_input_submitted: stale _running=True, worker_state={worker_state} — resetting")
+            log.write(Text(
+                "[warning] Previous run state was stale — starting fresh.",
+                style="yellow",
+            ))
+            self._orchestrator_running = False
+
+        if not self._orchestrator_running:
             self._start_run(text)
             event.input.placeholder = "Type steering instructions (Enter to send)..."
         else:
@@ -298,26 +329,28 @@ class AutoplannerApp(App):
         inp.placeholder = prompt_text
 
     def _start_run(self, task: str) -> None:
-        self._running = True
+        debug(f"_start_run: task={task!r} ingest={self._ingest!r}")
+        self._orchestrator_running = True
         log = self.query_one("#log", RichLog)
         log.write(Text(f"> {task}", style="bold"))
         self.query_one("#status-bar", Static).update("Running...")
-        self._run_worker(
+        self._worker = self._run_worker(
             orchestrator.run, task,
             skip_to_walkthrough=self._skip_to_walkthrough,
             ingest=self._ingest,
         )
 
     def _start_resume(self, run_id: str) -> None:
-        self._running = True
+        self._orchestrator_running = True
         log = self.query_one("#log", RichLog)
         log.write(Text(f"> Resuming run: {run_id}", style="bold"))
         self.query_one("#status-bar", Static).update("Resuming...")
         self.query_one("#prompt-input", Input).placeholder = "Type steering instructions (Enter to send)..."
-        self._run_worker(orchestrator.resume, run_id)
+        self._worker = self._run_worker(orchestrator.resume, run_id)
 
     @work(thread=True)
     def _run_worker(self, fn, first_arg, **extra_kwargs) -> None:
+        debug(f"_run_worker: fn={fn.__name__} first_arg={first_arg!r} extra={list(extra_kwargs.keys())}")
         try:
             result = fn(
                 first_arg,
@@ -453,20 +486,33 @@ class AutoplannerApp(App):
         )
 
     def _handle_run_failed(self, error: str, tb: str = "") -> None:
+        self._flush_streaming_buf()
+        self._safe_write("")
+        self._safe_write(Text("─" * 60, style="red"))
+        self._safe_write(Text("Run failed", style="bold red"))
+        self._safe_write(Text("─" * 60, style="red"))
+        self._safe_write(Text(error or "(no error message)", style="red"))
         if tb:
             self._safe_write("")
             self._safe_write(Text("Traceback:", style="red"))
             for line in tb.strip().splitlines():
                 self._safe_write(Text(line, style="dim red"))
+        self._safe_write("")
+        self._safe_write(Text(
+            "Resume from the last saved iteration:",
+            style="bold yellow",
+        ))
+        self._safe_write(Text("  autoplanner -c last", style="bold cyan"))
+        self._safe_write(Text("─" * 60, style="red"))
         self._handle_run_end(
-            "Error — press Ctrl+C to exit",
+            "Error — press Ctrl+C to exit. Resume with: autoplanner -c last",
             Text(f"✗ Error: {error}", style="bold red"),
         )
 
     def _handle_run_end(self, status_text: str, message: Text, *, bell: bool = False) -> None:
         try:
-            self._running = False
+            self._orchestrator_running = False
             self._finish_run(status_text, message, bell=bell)
         except Exception as e:
             debug(f"_handle_run_end: exception: {e}")
-            self._running = False
+            self._orchestrator_running = False
