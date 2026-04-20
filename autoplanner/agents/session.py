@@ -164,10 +164,10 @@ class ClaudeSession:
         w = get_writer()
         text_parts: list[str] = []
         current_block: str | None = None
-        start = time.monotonic()
+        last_activity = time.monotonic()
         buf_changed = False
 
-        while time.monotonic() - start < timeout:
+        while time.monotonic() - last_activity < timeout:
             ready, _, _ = select.select([self._fd], [], [], 0.1)
             if not ready:
                 if self._proc and self._proc.poll() is not None:
@@ -192,6 +192,7 @@ class ClaudeSession:
                     raise RuntimeError(f"{self.label} process exited unexpectedly")
                 continue
 
+            last_activity = time.monotonic()
             self._buf += data
             buf_changed = True
 
@@ -246,7 +247,7 @@ class ClaudeSession:
                         )
                     return "".join(text_parts).strip() or obj.get("result", "").strip()
 
-        raise RuntimeError(f"{self.label} timed out after {timeout}s")
+        raise RuntimeError(f"{self.label} idle for {timeout}s (no output received)")
 
     def close(self) -> None:
         from autoplanner.debug import debug
@@ -346,10 +347,14 @@ class CodexSession:
 
         text_parts: list[str] = []
         fd = proc.stdout.fileno()
-        start = time.monotonic()
+        last_activity = time.monotonic()
+        timed_out = False
 
         try:
-            while time.monotonic() - start < timeout:
+            while True:
+                if time.monotonic() - last_activity >= timeout:
+                    timed_out = True
+                    break
                 ready, _, _ = select.select([fd], [], [], 0.1)
                 if not ready:
                     if proc.poll() is not None:
@@ -360,6 +365,7 @@ class CodexSession:
                     if proc.poll() is not None:
                         break
                     continue
+                last_activity = time.monotonic()
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
@@ -386,6 +392,8 @@ class CodexSession:
                 elif evt_type == "turn.started":
                     w.write_status(f"  [{self.label}] thinking...")
         finally:
+            if timed_out and proc.poll() is None:
+                _kill_pgroup(proc.pid)
             stderr = proc.stderr.read() if proc.stderr else ""
             try:
                 proc.wait(timeout=10)
@@ -396,6 +404,9 @@ class CodexSession:
                 except Exception:
                     pass
             _active_pgroups.discard(proc.pid)
+
+        if timed_out:
+            raise RuntimeError(f"{self.label} idle for {timeout}s (no output received)")
 
         if proc.returncode != 0:
             if stderr:
